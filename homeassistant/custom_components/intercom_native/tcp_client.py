@@ -1,7 +1,8 @@
 """Async TCP client for Intercom Native protocol."""
-# VERSION: 4.1.0 - Fix protocol desync on bad length
+# VERSION: 4.2.0 - Reduce drain() calls for better throughput
 
 MAX_PAYLOAD_SIZE = 2048
+DRAIN_INTERVAL = 10  # Drain every N packets instead of every packet
 
 import asyncio
 import logging
@@ -157,7 +158,7 @@ class IntercomTcpClient:
                 _LOGGER.debug("[TCP#%d] STOP error: %s", self._instance_id, err)
 
     async def send_audio(self, data: bytes) -> bool:
-        """Send audio data with drain to ensure data is actually sent."""
+        """Send audio data - drain periodically to avoid blocking."""
         if not self._connected or not self._streaming:
             return False
 
@@ -172,14 +173,17 @@ class IntercomTcpClient:
         try:
             header = struct.pack("<BBH", MSG_AUDIO, FLAG_NONE, len(data))
             self._writer.write(header + data)
-            # Drain every packet to ensure data is sent - use short timeout to not block event loop
-            await asyncio.wait_for(self._writer.drain(), timeout=0.1)
+
+            # Only drain periodically to avoid blocking on every packet
+            # This allows TCP to batch data more efficiently
+            if self._audio_sent % DRAIN_INTERVAL == 0:
+                try:
+                    await asyncio.wait_for(self._writer.drain(), timeout=0.1)
+                except asyncio.TimeoutError:
+                    # TCP congestion - log but continue writing
+                    if self._audio_sent % 100 == 0:
+                        _LOGGER.warning("[TCP#%d] Drain slow at #%d", self._instance_id, self._audio_sent)
             return True
-        except asyncio.TimeoutError:
-            # Drain timeout - TCP congestion, skip this packet
-            if self._audio_sent % 50 == 0:
-                _LOGGER.warning("[TCP#%d] Drain timeout at #%d", self._instance_id, self._audio_sent)
-            return False
         except Exception as err:
             _LOGGER.error("[TCP#%d] Audio send error: %s", self._instance_id, err)
             return False

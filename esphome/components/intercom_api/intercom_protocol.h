@@ -56,8 +56,8 @@ static constexpr size_t MAX_AUDIO_CHUNK = 2048;  // Browser may send larger chun
 static constexpr size_t MAX_MESSAGE_SIZE = HEADER_SIZE + MAX_AUDIO_CHUNK + 64;
 
 // Buffer sizes
-static constexpr size_t RX_BUFFER_SIZE = 8192;       // ~256ms of audio
-static constexpr size_t TX_BUFFER_SIZE = 8192;
+static constexpr size_t RX_BUFFER_SIZE = 8192;       // ~256ms - fits 4 browser chunks
+static constexpr size_t TX_BUFFER_SIZE = 2048;       // ~64ms of audio
 static constexpr size_t SOCKET_BUFFER_SIZE = 4096;
 
 // Timeouts

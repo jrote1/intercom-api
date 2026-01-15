@@ -1,9 +1,9 @@
 /**
  * Intercom Card - Lovelace custom card for intercom_native integration
- * VERSION: 4.2.0 - Larger chunks (64ms), 16kHz AudioContext, faster base64
+ * VERSION: 4.3.0 - Scheduled playback for low latency (no queue accumulation)
  */
 
-const INTERCOM_CARD_VERSION = "4.2.0";
+const INTERCOM_CARD_VERSION = "4.3.0";
 
 class IntercomCard extends HTMLElement {
   constructor() {
@@ -19,12 +19,12 @@ class IntercomCard extends HTMLElement {
     this._workletNode = null;
     this._source = null;
 
-    // Audio playback
+    // Audio playback - scheduled for low latency
     this._playbackContext = null;
     this._gainNode = null;
-    this._audioQueue = [];
-    this._isPlaying = false;
+    this._nextPlayTime = 0;
     this._volume = 80;
+    this._chunksDropped = 0;
 
     // Event subscription
     this._unsubscribe = null;
@@ -342,8 +342,8 @@ class IntercomCard extends HTMLElement {
       this._playbackContext = null;
     }
     this._gainNode = null;
-    this._audioQueue = [];
-    this._isPlaying = false;
+    this._nextPlayTime = 0;
+    this._chunksDropped = 0;
   }
 
   // Send audio to HA via JSON (proxy compatible)
@@ -400,9 +400,10 @@ class IntercomCard extends HTMLElement {
     }
 
     this._chunksReceived++;
-    if (this._chunksReceived <= 5 || this._chunksReceived % 50 === 0) {
+    if (this._chunksReceived <= 5 || this._chunksReceived % 100 === 0) {
       this._updateStats();
-      this._log(`Recv #${this._chunksReceived}: queue=${this._audioQueue.length}`);
+      const latency = this._nextPlayTime - this._playbackContext.currentTime;
+      this._log(`Recv #${this._chunksReceived}: latency=${(latency*1000).toFixed(0)}ms dropped=${this._chunksDropped}`);
     }
 
     try {
@@ -420,34 +421,45 @@ class IntercomCard extends HTMLElement {
         float32[i] = int16[i] / 32768.0;
       }
 
-      this._audioQueue.push(float32);
-      this._playQueue();
+      this._playScheduled(float32);
     } catch (err) {
       this._log("Recv error: " + err.message);
     }
   }
 
-  _playQueue() {
-    if (this._isPlaying || this._audioQueue.length === 0) return;
+  _playScheduled(float32) {
     if (!this._playbackContext || !this._gainNode) return;
-
-    this._isPlaying = true;
-    const float32 = this._audioQueue.shift();
 
     try {
       const buffer = this._playbackContext.createBuffer(1, float32.length, 16000);
       buffer.getChannelData(0).set(float32);
 
+      const now = this._playbackContext.currentTime;
+
+      // If we fell behind, jump to now
+      if (this._nextPlayTime < now) {
+        this._nextPlayTime = now + 0.01; // Small buffer
+      }
+
+      // If latency is too high (>200ms), drop this chunk to catch up
+      const latency = this._nextPlayTime - now;
+      if (latency > 0.2) {
+        this._chunksDropped++;
+        // Reset to catch up
+        if (this._chunksDropped % 50 === 1) {
+          this._log(`High latency ${(latency*1000).toFixed(0)}ms, resetting`);
+          this._nextPlayTime = now + 0.02;
+        }
+        return;
+      }
+
       const src = this._playbackContext.createBufferSource();
       src.buffer = buffer;
       src.connect(this._gainNode);
-      src.onended = () => {
-        this._isPlaying = false;
-        this._playQueue();
-      };
-      src.start();
+      src.start(this._nextPlayTime);
+      this._nextPlayTime += buffer.duration;
     } catch (err) {
-      this._isPlaying = false;
+      // Ignore
     }
   }
 

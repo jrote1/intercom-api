@@ -27,25 +27,29 @@ Sostituisce `esphome-intercom` (legacy UDP) con un approccio più robusto.
 
 ---
 
-## STATO ATTUALE (Milestone 2025-01-15)
+## STATO ATTUALE (Milestone 2026-01-15)
 
 ### Funziona
 - Full duplex Browser ↔ HA ↔ ESP stabile (testato 60+ secondi)
-- Audio ESP→Browser arriva (1000+ pacchetti)
-- Audio Browser→ESP arriva (200+ pacchetti)
+- Audio ESP→Browser arriva (2000+ pacchetti)
+- Audio Browser→ESP arriva (stabilizzato dopo fix TCP drain)
 - Nessun crash/disconnect a 5 secondi (bug PING risolto)
+- Stop pulito senza spam "Audio TX failed"
 
 ### Problemi da risolvere
 1. **Audio glitchy** - suona tipo "cc-ii-aa-oo" con pezzi mancanti (stuttering)
-2. **Latenza altissima** - 8-9 secondi tra cattura mic e riproduzione speaker ESP
+2. **Latenza** - migliorata con scheduled playback, da testare
 3. **Task RTOS non ottimizzati** - attualmente un solo task fa sia TX che RX
 
-### Fix applicati in questa sessione
+### Fix applicati
 1. `send_mutex_` - Thread safety per tx_buffer_ (race condition PING vs AUDIO)
 2. No PING durante streaming - Evita interferenze
 3. Partial send handling - Gestisce TCP congestion
 4. Protocol desync fix HA - Chiude connessione invece di corrompere stream
 5. MAX_MESSAGE_SIZE aumentato - Browser manda chunk 2048 bytes
+6. **Scheduled WebAudio playback** (v4.3.0) - Sostituisce queue-based, fix latenza browser
+7. **Graceful stop** - Check `active_` prima di send, delay prima di close socket
+8. **TCP drain optimization** (v4.2.0) - Drain ogni 10 pacchetti invece di ogni pacchetto
 
 ---
 
@@ -75,12 +79,13 @@ Sostituisce `esphome-intercom` (legacy UDP) con un approccio più robusto.
 ### 2. HA Integration: `intercom_native`
 - **WebSocket API**: `intercom_native/start`, `intercom_native/stop`, `intercom_native/audio`
 - **TCP client**: Async verso ESP porta 6054
-- **Versione**: 4.1.0
+- **Versione**: 4.2.0 (tcp_client.py)
 
 ### 3. Frontend: `intercom-card.js`
 - **Lovelace card** custom
 - **getUserMedia** + AudioWorklet (16kHz)
 - **WebSocket** JSON + base64 audio verso HA
+- **Versione**: 4.3.0 (scheduled playback)
 
 ---
 
@@ -138,7 +143,7 @@ intercom-api/
 │           ├── manifest.json         # HA manifest
 │           ├── config_flow.py        # Config UI
 │           ├── websocket_api.py      # WS commands + session manager
-│           ├── tcp_client.py         # Async TCP client (v4.1.0)
+│           ├── tcp_client.py         # Async TCP client (v4.2.0)
 │           └── const.py              # Constants
 │
 ├── frontend/

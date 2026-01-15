@@ -42,8 +42,9 @@ void IntercomApi::setup() {
   // Allocate frame buffers
   this->tx_buffer_ = (uint8_t *)heap_caps_malloc(MAX_MESSAGE_SIZE, MALLOC_CAP_INTERNAL);
   this->rx_buffer_ = (uint8_t *)heap_caps_malloc(MAX_MESSAGE_SIZE, MALLOC_CAP_INTERNAL);
+  this->audio_tx_buffer_ = (uint8_t *)heap_caps_malloc(MAX_MESSAGE_SIZE, MALLOC_CAP_INTERNAL);
 
-  if (!this->tx_buffer_ || !this->rx_buffer_) {
+  if (!this->tx_buffer_ || !this->rx_buffer_ || !this->audio_tx_buffer_) {
     ESP_LOGE(TAG, "Failed to allocate frame buffers");
     this->mark_failed();
     return;
@@ -58,7 +59,7 @@ void IntercomApi::setup() {
   }
 #endif
 
-  // Create server task
+  // Create server task (Core 1) - handles TCP connections and receiving
   BaseType_t ok = xTaskCreatePinnedToCore(
       IntercomApi::server_task,
       "intercom_srv",
@@ -75,24 +76,41 @@ void IntercomApi::setup() {
     return;
   }
 
-  // Create audio task
+  // Create TX task (Core 0) - handles mic capture and sending
   ok = xTaskCreatePinnedToCore(
-      IntercomApi::audio_task,
-      "intercom_audio",
-      8192,
+      IntercomApi::tx_task,
+      "intercom_tx",
+      4096,
       this,
-      6,  // Higher priority than server
-      &this->audio_task_handle_,
+      6,  // High priority for low latency
+      &this->tx_task_handle_,
       0  // Core 0
   );
 
   if (ok != pdPASS) {
-    ESP_LOGE(TAG, "Failed to create audio task");
+    ESP_LOGE(TAG, "Failed to create TX task");
     this->mark_failed();
     return;
   }
 
-  ESP_LOGI(TAG, "Intercom API ready on port %d", INTERCOM_PORT);
+  // Create speaker task (Core 1) - handles playback alongside server
+  ok = xTaskCreatePinnedToCore(
+      IntercomApi::speaker_task,
+      "intercom_spk",
+      8192,  // Larger stack for audio buffer
+      this,
+      5,  // Medium priority
+      &this->speaker_task_handle_,
+      1  // Core 1 - same as server, RX direction
+  );
+
+  if (ok != pdPASS) {
+    ESP_LOGE(TAG, "Failed to create speaker task");
+    this->mark_failed();
+    return;
+  }
+
+  ESP_LOGI(TAG, "Intercom API ready on port %d (3 tasks)", INTERCOM_PORT);
 }
 
 void IntercomApi::loop() {
@@ -134,9 +152,15 @@ void IntercomApi::start() {
   }
 #endif
 
-  // Notify server task
+  // Notify tasks
   if (this->server_task_handle_) {
     xTaskNotifyGive(this->server_task_handle_);
+  }
+  if (this->tx_task_handle_) {
+    xTaskNotifyGive(this->tx_task_handle_);
+  }
+  if (this->speaker_task_handle_) {
+    xTaskNotifyGive(this->speaker_task_handle_);
   }
 
   this->start_trigger_.trigger();
@@ -149,6 +173,10 @@ void IntercomApi::stop() {
 
   ESP_LOGI(TAG, "Stopping intercom");
   this->active_.store(false, std::memory_order_release);
+
+  // Give audio task time to notice and exit its loops gracefully
+  // This prevents "Audio TX failed" spam during shutdown
+  vTaskDelay(pdMS_TO_TICKS(20));
 
   // Close client connection
   this->close_client_socket_();
@@ -332,6 +360,23 @@ void IntercomApi::server_task_() {
           // Connection closed or error
           ESP_LOGI(TAG, "Client disconnected");
           this->close_client_socket_();
+
+          // Stop audio components when client disconnects
+          if (this->active_.load(std::memory_order_acquire)) {
+            this->active_.store(false, std::memory_order_release);
+#ifdef USE_MICROPHONE
+            if (this->microphone_ != nullptr) {
+              this->microphone_->stop();
+            }
+#endif
+#ifdef USE_SPEAKER
+            if (this->speaker_ != nullptr) {
+              this->speaker_->stop();
+            }
+#endif
+            this->stop_trigger_.trigger();
+          }
+
           this->state_ = ConnectionState::DISCONNECTED;
           this->disconnect_trigger_.trigger();
         }
@@ -349,103 +394,174 @@ void IntercomApi::server_task_() {
   }
 }
 
-// === Audio Task ===
+// === TX Task (Core 0) - Mic to Network ===
 
-void IntercomApi::audio_task(void *param) {
-  static_cast<IntercomApi *>(param)->audio_task_();
+void IntercomApi::tx_task(void *param) {
+  static_cast<IntercomApi *>(param)->tx_task_();
 }
 
-void IntercomApi::audio_task_() {
-  ESP_LOGI(TAG, "Audio task started");
+void IntercomApi::tx_task_() {
+  ESP_LOGI(TAG, "TX task started on Core %d", xPortGetCoreID());
 
   uint8_t audio_chunk[AUDIO_CHUNK_SIZE];
   uint32_t tx_count = 0;
-  uint32_t no_data_count = 0;
   uint32_t last_log_ms = 0;
 
   while (true) {
-    if (!this->active_.load(std::memory_order_acquire) || this->client_.socket < 0) {
+    // Wait until active and connected
+    if (!this->active_.load(std::memory_order_acquire) ||
+        this->client_.socket < 0 ||
+        !this->client_.streaming) {
       if (tx_count > 0) {
-        ESP_LOGI(TAG, "Audio task paused: active=%d socket=%d (sent %lu)",
-                 this->active_.load(), this->client_.socket, (unsigned long)tx_count);
+        ESP_LOGI(TAG, "TX task paused (sent %lu)", (unsigned long)tx_count);
+        tx_count = 0;
       }
-      vTaskDelay(pdMS_TO_TICKS(50));
-      tx_count = 0;
-      no_data_count = 0;
+      vTaskDelay(pdMS_TO_TICKS(20));
       continue;
     }
 
-    // === TX: Mic buffer → Network ===
-    // Process up to 4 chunks per iteration to keep latency low
-    int chunks_sent = 0;
-    while (chunks_sent < 4) {
-      if (xSemaphoreTake(this->mic_mutex_, pdMS_TO_TICKS(2)) != pdTRUE) {
-        break;
-      }
+    // Read from mic buffer
+    if (xSemaphoreTake(this->mic_mutex_, pdMS_TO_TICKS(5)) != pdTRUE) {
+      vTaskDelay(pdMS_TO_TICKS(1));
+      continue;
+    }
 
-      size_t avail = this->mic_buffer_->available();
-      if (avail < AUDIO_CHUNK_SIZE) {
-        xSemaphoreGive(this->mic_mutex_);
-        no_data_count++;
-        // Log if we've been waiting too long with no mic data
-        if (no_data_count > 0 && (millis() - last_log_ms > 1000)) {
-          ESP_LOGW(TAG, "No mic data: avail=%zu streaming=%d tx_count=%lu",
-                   avail, this->client_.streaming, (unsigned long)tx_count);
-          last_log_ms = millis();
-        }
-        break;
-      }
-      no_data_count = 0;
-
-      size_t read = this->mic_buffer_->read(audio_chunk, AUDIO_CHUNK_SIZE, 0);
+    size_t avail = this->mic_buffer_->available();
+    if (avail < AUDIO_CHUNK_SIZE) {
       xSemaphoreGive(this->mic_mutex_);
-
-      if (read == AUDIO_CHUNK_SIZE && this->client_.socket >= 0) {
-        // Send without holding mutex
-        bool sent = this->send_message_(this->client_.socket, MessageType::AUDIO, MessageFlags::NONE,
-                                        audio_chunk, AUDIO_CHUNK_SIZE);
-        if (sent) {
-          tx_count++;
-          chunks_sent++;
-          if (tx_count <= 5 || tx_count % 100 == 0) {
-            ESP_LOGD(TAG, "Audio TX #%lu avail=%zu", (unsigned long)tx_count, this->mic_buffer_->available());
-          }
-        } else {
-          ESP_LOGW(TAG, "Audio TX failed at #%lu", (unsigned long)tx_count);
-          break;
-        }
-      }
+      // No data, short sleep
+      vTaskDelay(pdMS_TO_TICKS(2));
+      continue;
     }
 
-    // === RX: Speaker buffer → Speaker ===
-#ifdef USE_SPEAKER
-    if (this->speaker_ != nullptr) {
-      // Process up to 4 chunks per iteration
-      int chunks_played = 0;
-      while (chunks_played < 4) {
-        if (xSemaphoreTake(this->speaker_mutex_, pdMS_TO_TICKS(2)) != pdTRUE) {
-          break;
+    size_t read = this->mic_buffer_->read(audio_chunk, AUDIO_CHUNK_SIZE, 0);
+    xSemaphoreGive(this->mic_mutex_);
+
+    if (read != AUDIO_CHUNK_SIZE) {
+      continue;
+    }
+
+    // Check still active before sending
+    if (!this->active_.load(std::memory_order_acquire) || this->client_.socket < 0) {
+      continue;
+    }
+
+    // Send directly using dedicated audio_tx_buffer_ (no mutex needed)
+    int socket = this->client_.socket;
+    if (socket >= 0) {
+      MessageHeader header;
+      header.type = static_cast<uint8_t>(MessageType::AUDIO);
+      header.flags = static_cast<uint8_t>(MessageFlags::NONE);
+      header.length = AUDIO_CHUNK_SIZE;
+
+      memcpy(this->audio_tx_buffer_, &header, HEADER_SIZE);
+      memcpy(this->audio_tx_buffer_ + HEADER_SIZE, audio_chunk, AUDIO_CHUNK_SIZE);
+
+      size_t total = HEADER_SIZE + AUDIO_CHUNK_SIZE;
+      ssize_t sent = send(socket, this->audio_tx_buffer_, total, MSG_DONTWAIT);
+
+      if (sent == (ssize_t)total) {
+        tx_count++;
+        if (tx_count <= 5 || tx_count % 200 == 0) {
+          ESP_LOGD(TAG, "TX #%lu (buf=%zu)", (unsigned long)tx_count, this->mic_buffer_->available());
         }
-
-        if (this->speaker_buffer_->available() < AUDIO_CHUNK_SIZE) {
-          xSemaphoreGive(this->speaker_mutex_);
-          break;
-        }
-
-        size_t read = this->speaker_buffer_->read(audio_chunk, AUDIO_CHUNK_SIZE, 0);
-        xSemaphoreGive(this->speaker_mutex_);
-
-        if (read == AUDIO_CHUNK_SIZE && this->volume_ > 0.001f) {
-          this->speaker_->play(audio_chunk, AUDIO_CHUNK_SIZE, pdMS_TO_TICKS(20));
-          chunks_played++;
+      } else if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+        if (this->active_.load(std::memory_order_acquire)) {
+          ESP_LOGW(TAG, "TX send error: %d", errno);
         }
       }
+      // If EAGAIN/EWOULDBLOCK, just skip this chunk (don't accumulate latency)
     }
-#endif
 
-    // Short delay to allow other tasks to run
-    vTaskDelay(pdMS_TO_TICKS(2));
+    // Minimal delay - let FreeRTOS scheduler handle timing
+    taskYIELD();
   }
+}
+
+// === Speaker Task (Core 0) - Network to Speaker ===
+
+void IntercomApi::speaker_task(void *param) {
+  static_cast<IntercomApi *>(param)->speaker_task_();
+}
+
+void IntercomApi::speaker_task_() {
+  ESP_LOGI(TAG, "Speaker task started on Core %d", xPortGetCoreID());
+
+#ifdef USE_SPEAKER
+  // Use buffer for batch processing - 4 chunks at once (2048 bytes)
+  uint8_t audio_chunk[AUDIO_CHUNK_SIZE * 4];
+  uint32_t play_count = 0;
+  uint32_t total_play_time_ms = 0;
+  uint32_t play_calls = 0;
+
+  while (true) {
+    // Wait until active
+    if (!this->active_.load(std::memory_order_acquire) || this->speaker_ == nullptr) {
+      if (play_count > 0) {
+        uint32_t avg_play_ms = play_calls > 0 ? total_play_time_ms / play_calls : 0;
+        ESP_LOGI(TAG, "Speaker task paused (played %lu, avg_play=%lums)",
+                 (unsigned long)play_count, (unsigned long)avg_play_ms);
+        play_count = 0;
+        total_play_time_ms = 0;
+        play_calls = 0;
+      }
+      vTaskDelay(pdMS_TO_TICKS(20));
+      continue;
+    }
+
+    // Read from speaker buffer - grab as much as available up to 8 chunks
+    if (xSemaphoreTake(this->speaker_mutex_, pdMS_TO_TICKS(5)) != pdTRUE) {
+      taskYIELD();
+      continue;
+    }
+
+    size_t avail = this->speaker_buffer_->available();
+    if (avail < AUDIO_CHUNK_SIZE) {
+      xSemaphoreGive(this->speaker_mutex_);
+      // Very short delay when buffer is empty
+      vTaskDelay(pdMS_TO_TICKS(1));
+      continue;
+    }
+
+    // Read up to 4 chunks at once to reduce overhead
+    size_t to_read = avail;
+    if (to_read > AUDIO_CHUNK_SIZE * 4) to_read = AUDIO_CHUNK_SIZE * 4;
+    // Align to chunk size
+    to_read = (to_read / AUDIO_CHUNK_SIZE) * AUDIO_CHUNK_SIZE;
+
+    size_t read = this->speaker_buffer_->read(audio_chunk, to_read, 0);
+    xSemaphoreGive(this->speaker_mutex_);
+
+    if (read > 0 && this->volume_ > 0.001f) {
+      // Time the play() call
+      uint32_t start_ms = millis();
+
+      // Play entire batch at once - use short timeout to avoid blocking
+      this->speaker_->play(audio_chunk, read, pdMS_TO_TICKS(20));
+
+      uint32_t elapsed_ms = millis() - start_ms;
+      total_play_time_ms += elapsed_ms;
+      play_calls++;
+
+      play_count += read / AUDIO_CHUNK_SIZE;
+
+      if (play_count <= 5 || play_count % 200 == 0) {
+        uint32_t avg_ms = play_calls > 0 ? total_play_time_ms / play_calls : 0;
+        ESP_LOGD(TAG, "SPK #%lu (read=%zu buf=%zu play=%lums avg=%lums)",
+                 (unsigned long)play_count, read, avail,
+                 (unsigned long)elapsed_ms, (unsigned long)avg_ms);
+      }
+    }
+
+    // Minimal delay
+    taskYIELD();
+  }
+#else
+  // No speaker, just idle
+  while (true) {
+    vTaskDelay(pdMS_TO_TICKS(1000));
+  }
+#endif
 }
 
 // === Protocol ===

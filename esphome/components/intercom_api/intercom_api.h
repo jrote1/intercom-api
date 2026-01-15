@@ -89,13 +89,17 @@ class IntercomApi : public Component {
   Trigger<> *get_stop_trigger() { return &this->stop_trigger_; }
 
  protected:
-  // Server task - handles incoming connections
+  // Server task - handles incoming connections and receiving data
   static void server_task(void *param);
   void server_task_();
 
-  // Audio task - handles mic capture and playback
-  static void audio_task(void *param);
-  void audio_task_();
+  // TX task - handles mic capture and sending to network (Core 0)
+  static void tx_task(void *param);
+  void tx_task_();
+
+  // Speaker task - handles playback from speaker buffer (Core 0)
+  static void speaker_task(void *param);
+  void speaker_task_();
 
   // Protocol handling
   bool send_message_(int socket, MessageType type, MessageFlags flags = MessageFlags::NONE,
@@ -142,13 +146,15 @@ class IntercomApi : public Component {
   SemaphoreHandle_t speaker_mutex_{nullptr};
 
   // Pre-allocated frame buffers
-  uint8_t *tx_buffer_{nullptr};
-  uint8_t *rx_buffer_{nullptr};
+  uint8_t *tx_buffer_{nullptr};      // Used by server_task for control messages
+  uint8_t *rx_buffer_{nullptr};      // Used by server_task for receiving
+  uint8_t *audio_tx_buffer_{nullptr}; // Used by tx_task for audio (no mutex needed)
   SemaphoreHandle_t send_mutex_{nullptr};  // Protects tx_buffer_ during send
 
   // Task handles
   TaskHandle_t server_task_handle_{nullptr};
-  TaskHandle_t audio_task_handle_{nullptr};
+  TaskHandle_t tx_task_handle_{nullptr};
+  TaskHandle_t speaker_task_handle_{nullptr};
 
   // Volume
   float volume_{1.0f};
