@@ -8,7 +8,6 @@
 #include <cstring>
 #include <errno.h>
 #include <fcntl.h>
-#include <sys/ioctl.h>
 
 namespace esphome {
 namespace intercom_api {
@@ -60,6 +59,43 @@ void IntercomApi::setup() {
   }
 #endif
 
+#ifdef USE_ESP_AEC
+  // Initialize AEC if configured
+  if (this->aec_ != nullptr && this->aec_->is_initialized()) {
+    this->aec_frame_samples_ = this->aec_->get_frame_size();
+    if (this->aec_frame_samples_ <= 0 || this->aec_frame_samples_ > 1024) {
+      ESP_LOGW(TAG, "AEC frame_size invalid (%d) -> disabled", this->aec_frame_samples_);
+      this->aec_enabled_ = false;
+    } else {
+      // Create speaker reference buffer and mutex
+      this->spk_ref_mutex_ = xSemaphoreCreateMutex();
+      this->spk_ref_buffer_ = RingBuffer::create(RX_BUFFER_SIZE);  // ~256ms of reference
+
+      // Allocate AEC frame buffers
+      const size_t frame_bytes = (size_t)this->aec_frame_samples_ * sizeof(int16_t);
+      this->aec_mic_ = (int16_t *)heap_caps_malloc(frame_bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+      this->aec_ref_ = (int16_t *)heap_caps_malloc(frame_bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+      this->aec_out_ = (int16_t *)heap_caps_malloc(frame_bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+
+      if (!this->spk_ref_mutex_ || !this->spk_ref_buffer_ ||
+          !this->aec_mic_ || !this->aec_ref_ || !this->aec_out_) {
+        ESP_LOGE(TAG, "AEC buffer allocation failed -> disabled");
+        this->aec_enabled_ = false;
+        // Cleanup partial allocs
+        if (this->aec_mic_) { heap_caps_free(this->aec_mic_); this->aec_mic_ = nullptr; }
+        if (this->aec_ref_) { heap_caps_free(this->aec_ref_); this->aec_ref_ = nullptr; }
+        if (this->aec_out_) { heap_caps_free(this->aec_out_); this->aec_out_ = nullptr; }
+      } else {
+        ESP_LOGI(TAG, "AEC ready: frame_size=%d samples (%dms)",
+                 this->aec_frame_samples_,
+                 this->aec_frame_samples_ * 1000 / SAMPLE_RATE);
+        // AEC starts disabled, user enables via switch
+        this->aec_enabled_ = false;
+      }
+    }
+  }
+#endif
+
   // Create server task (Core 1) - handles TCP connections and receiving
   // Highest priority (7) - RX must never starve, data must flow immediately
   BaseType_t ok = xTaskCreatePinnedToCore(
@@ -78,12 +114,13 @@ void IntercomApi::setup() {
     return;
   }
 
-  // Create TX task (Core 0) - handles mic capture and sending
+  // Create TX task (Core 0) - handles mic capture, AEC processing, and sending
   // High priority (6) for low latency mic→network
+  // Stack increased to 12KB for AEC processing (uses FFT internally)
   ok = xTaskCreatePinnedToCore(
       IntercomApi::tx_task,
       "intercom_tx",
-      4096,
+      12288,  // 12KB stack for AEC processing
       this,
       6,  // High priority for low latency
       &this->tx_task_handle_,
@@ -130,6 +167,13 @@ void IntercomApi::dump_config() {
 #endif
 #ifdef USE_SPEAKER
   ESP_LOGCONFIG(TAG, "  Speaker: %s", this->speaker_ ? "configured" : "none");
+#endif
+#ifdef USE_ESP_AEC
+  if (this->aec_ != nullptr) {
+    ESP_LOGCONFIG(TAG, "  AEC: configured (frame_size=%d samples)", this->aec_frame_samples_);
+  } else {
+    ESP_LOGCONFIG(TAG, "  AEC: none");
+  }
 #endif
 }
 
@@ -183,6 +227,27 @@ void IntercomApi::set_mic_gain_db(float db) {
   this->mic_gain_ = powf(10.0f, db / 20.0f);
   ESP_LOGD(TAG, "Mic gain set to %.1f dB (%.2fx)", db, this->mic_gain_);
 }
+
+#ifdef USE_ESP_AEC
+void IntercomApi::set_aec_enabled(bool enabled) {
+  if (this->aec_ == nullptr || !this->aec_->is_initialized()) {
+    ESP_LOGW(TAG, "Cannot enable AEC: not initialized");
+    return;
+  }
+  if (this->aec_mic_ == nullptr) {
+    ESP_LOGW(TAG, "Cannot enable AEC: buffers not allocated");
+    return;
+  }
+  this->aec_enabled_ = enabled;
+  // Reset fill levels when toggling
+  this->aec_mic_fill_ = 0;
+  this->aec_ref_fill_ = 0;
+  if (this->spk_ref_buffer_) {
+    this->spk_ref_buffer_->reset();
+  }
+  ESP_LOGI(TAG, "AEC %s", enabled ? "enabled" : "disabled");
+}
+#endif
 
 void IntercomApi::connect_to(const std::string &host, uint16_t port) {
   this->client_mode_ = true;
@@ -349,18 +414,6 @@ void IntercomApi::server_task_() {
 
     // Handle existing client
     if (this->client_.socket.load() >= 0) {
-      // Monitor TCP backlog during streaming (helps debug latency issues)
-      if (this->client_.streaming.load()) {
-        int pending = 0;
-        if (ioctl(this->client_.socket.load(), FIONREAD, &pending) == 0 && pending > 4096) {
-          static uint32_t backlog_warn_count = 0;
-          backlog_warn_count++;
-          if (backlog_warn_count <= 5 || backlog_warn_count % 100 == 0) {
-            ESP_LOGW(TAG, "TCP backlog: %d bytes (RX falling behind)", pending);
-          }
-        }
-      }
-
       // Check for incoming data
       fd_set read_fds;
       FD_ZERO(&read_fds);
@@ -401,21 +454,20 @@ void IntercomApi::tx_task(void *param) {
 }
 
 void IntercomApi::tx_task_() {
-  ESP_LOGI(TAG, "TX task started on Core %d", xPortGetCoreID());
+  ESP_LOGD(TAG, "TX task started");
 
   uint8_t audio_chunk[AUDIO_CHUNK_SIZE];
-  uint32_t tx_count = 0;
-  uint32_t last_log_ms = 0;
 
   while (true) {
     // Wait until active and connected
     if (!this->active_.load(std::memory_order_acquire) ||
         this->client_.socket.load() < 0 ||
         !this->client_.streaming.load()) {
-      if (tx_count > 0) {
-        ESP_LOGI(TAG, "TX task paused (sent %lu)", (unsigned long)tx_count);
-        tx_count = 0;
-      }
+#ifdef USE_ESP_AEC
+      // Reset AEC accumulators when paused
+      this->aec_mic_fill_ = 0;
+      this->aec_ref_fill_ = 0;
+#endif
       vTaskDelay(pdMS_TO_TICKS(20));
       continue;
     }
@@ -441,6 +493,81 @@ void IntercomApi::tx_task_() {
       continue;
     }
 
+#ifdef USE_ESP_AEC
+    // AEC Processing: accumulate samples, process when full frame ready
+    if (this->aec_enabled_ && this->aec_ != nullptr && this->aec_mic_ != nullptr) {
+      const int16_t *mic_samples = reinterpret_cast<const int16_t *>(audio_chunk);
+      size_t num_samples = AUDIO_CHUNK_SIZE / sizeof(int16_t);  // 256 samples per chunk
+
+      // Copy mic samples to accumulator
+      size_t samples_to_copy = std::min(num_samples,
+                                        (size_t)this->aec_frame_samples_ - this->aec_mic_fill_);
+      memcpy(this->aec_mic_ + this->aec_mic_fill_, mic_samples, samples_to_copy * sizeof(int16_t));
+      this->aec_mic_fill_ += samples_to_copy;
+
+      // If we have a full AEC frame, process it
+      if (this->aec_mic_fill_ >= (size_t)this->aec_frame_samples_) {
+        // Read speaker reference from buffer (same frame size)
+        size_t ref_bytes_needed = this->aec_frame_samples_ * sizeof(int16_t);
+
+        if (xSemaphoreTake(this->spk_ref_mutex_, pdMS_TO_TICKS(2)) == pdTRUE) {
+          size_t ref_avail = this->spk_ref_buffer_->available();
+          if (ref_avail >= ref_bytes_needed) {
+            this->spk_ref_buffer_->read(this->aec_ref_, ref_bytes_needed, 0);
+          } else {
+            // Not enough reference - use silence (still process to reduce latency)
+            memset(this->aec_ref_, 0, ref_bytes_needed);
+          }
+          xSemaphoreGive(this->spk_ref_mutex_);
+        } else {
+          memset(this->aec_ref_, 0, ref_bytes_needed);
+        }
+
+        // Process AEC
+        this->aec_->process(this->aec_mic_, this->aec_ref_, this->aec_out_, this->aec_frame_samples_);
+
+        // Send processed audio (may be larger than AUDIO_CHUNK_SIZE)
+        size_t out_bytes = this->aec_frame_samples_ * sizeof(int16_t);
+
+        // Check still active before sending
+        if (this->active_.load(std::memory_order_acquire) && this->client_.socket.load() >= 0) {
+          int socket = this->client_.socket.load();
+          MessageHeader header;
+          header.type = static_cast<uint8_t>(MessageType::AUDIO);
+          header.flags = static_cast<uint8_t>(MessageFlags::NONE);
+          header.length = out_bytes;
+
+          memcpy(this->audio_tx_buffer_, &header, HEADER_SIZE);
+          memcpy(this->audio_tx_buffer_ + HEADER_SIZE, this->aec_out_, out_bytes);
+
+          size_t total = HEADER_SIZE + out_bytes;
+          ssize_t sent = send(socket, this->audio_tx_buffer_, total, MSG_DONTWAIT);
+
+          if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+            if (this->active_.load(std::memory_order_acquire)) {
+              ESP_LOGW(TAG, "TX send error: %d", errno);
+            }
+          }
+        }
+
+        // Reset accumulators
+        this->aec_mic_fill_ = 0;
+
+        // Handle overflow: if we had more samples than frame_size, carry over
+        if (samples_to_copy < num_samples) {
+          size_t remaining = num_samples - samples_to_copy;
+          memcpy(this->aec_mic_, mic_samples + samples_to_copy, remaining * sizeof(int16_t));
+          this->aec_mic_fill_ = remaining;
+        }
+      }
+
+      // Minimal delay
+      taskYIELD();
+      continue;  // Skip non-AEC path
+    }
+#endif
+
+    // Non-AEC path: send directly
     // Check still active before sending
     if (!this->active_.load(std::memory_order_acquire) || this->client_.socket.load() < 0) {
       continue;
@@ -460,17 +587,11 @@ void IntercomApi::tx_task_() {
       size_t total = HEADER_SIZE + AUDIO_CHUNK_SIZE;
       ssize_t sent = send(socket, this->audio_tx_buffer_, total, MSG_DONTWAIT);
 
-      if (sent == (ssize_t)total) {
-        tx_count++;
-        if (tx_count <= 5 || tx_count % 200 == 0) {
-          ESP_LOGD(TAG, "TX #%lu (buf=%zu)", (unsigned long)tx_count, this->mic_buffer_->available());
-        }
-      } else if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+      if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
         if (this->active_.load(std::memory_order_acquire)) {
           ESP_LOGW(TAG, "TX send error: %d", errno);
         }
       }
-      // If EAGAIN/EWOULDBLOCK, just skip this chunk (don't accumulate latency)
     }
 
     // Minimal delay - let FreeRTOS scheduler handle timing
@@ -485,26 +606,14 @@ void IntercomApi::speaker_task(void *param) {
 }
 
 void IntercomApi::speaker_task_() {
-  ESP_LOGI(TAG, "Speaker task started on Core %d", xPortGetCoreID());
+  ESP_LOGD(TAG, "Speaker task started");
 
 #ifdef USE_SPEAKER
-  // Use buffer for batch processing - 4 chunks at once (2048 bytes)
   uint8_t audio_chunk[AUDIO_CHUNK_SIZE * 4];
-  uint32_t play_count = 0;
-  uint32_t total_play_time_ms = 0;
-  uint32_t play_calls = 0;
 
   while (true) {
     // Wait until active
     if (!this->active_.load(std::memory_order_acquire) || this->speaker_ == nullptr) {
-      if (play_count > 0) {
-        uint32_t avg_play_ms = play_calls > 0 ? total_play_time_ms / play_calls : 0;
-        ESP_LOGI(TAG, "Speaker task paused (played %lu, avg_play=%lums)",
-                 (unsigned long)play_count, (unsigned long)avg_play_ms);
-        play_count = 0;
-        total_play_time_ms = 0;
-        play_calls = 0;
-      }
       vTaskDelay(pdMS_TO_TICKS(20));
       continue;
     }
@@ -533,25 +642,17 @@ void IntercomApi::speaker_task_() {
     xSemaphoreGive(this->speaker_mutex_);
 
     if (read > 0 && this->volume_ > 0.001f) {
-      // Time the play() call
-      uint32_t start_ms = millis();
-
-      // Play with zero timeout - drop audio if speaker buffer is full
-      // This prevents latency accumulation; better to drop than delay
       this->speaker_->play(audio_chunk, read, 0);
 
-      uint32_t elapsed_ms = millis() - start_ms;
-      total_play_time_ms += elapsed_ms;
-      play_calls++;
-
-      play_count += read / AUDIO_CHUNK_SIZE;
-
-      if (play_count <= 5 || play_count % 200 == 0) {
-        uint32_t avg_ms = play_calls > 0 ? total_play_time_ms / play_calls : 0;
-        ESP_LOGD(TAG, "SPK #%lu (read=%zu buf=%zu play=%lums avg=%lums)",
-                 (unsigned long)play_count, read, avail,
-                 (unsigned long)elapsed_ms, (unsigned long)avg_ms);
+#ifdef USE_ESP_AEC
+      // Feed speaker reference buffer for AEC
+      if (this->aec_enabled_ && this->spk_ref_buffer_ != nullptr) {
+        if (xSemaphoreTake(this->spk_ref_mutex_, pdMS_TO_TICKS(2)) == pdTRUE) {
+          this->spk_ref_buffer_->write(audio_chunk, read);
+          xSemaphoreGive(this->spk_ref_mutex_);
+        }
       }
+#endif
     }
 
     // Minimal delay
@@ -611,12 +712,6 @@ bool IntercomApi::send_message_(int socket, MessageType type, MessageFlags flags
     if (errno == EAGAIN || errno == EWOULDBLOCK) {
       // Buffer full - wait briefly and retry
       if (millis() - start_ms > 20) {
-        // Timeout - skip this packet
-        static uint32_t skip_count = 0;
-        skip_count++;
-        if (skip_count <= 5 || skip_count % 100 == 0) {
-          ESP_LOGW(TAG, "Send timeout, skipped %lu packets", (unsigned long)skip_count);
-        }
         xSemaphoreGive(this->send_mutex_);
         return false;
       }
@@ -888,39 +983,10 @@ void IntercomApi::accept_client_() {
 // === Microphone Callback ===
 
 void IntercomApi::on_microphone_data_(const uint8_t *data, size_t len) {
-  static uint32_t callback_count = 0;
-  static uint32_t drop_active = 0;
-  static uint32_t drop_socket = 0;
-  static uint32_t drop_streaming = 0;
-  callback_count++;
-
-  if (!this->active_.load(std::memory_order_acquire)) {
-    drop_active++;
-    if (drop_active <= 5 || drop_active % 100 == 0) {
-      ESP_LOGW(TAG, "Mic DROP: not active (total=%lu)", (unsigned long)drop_active);
-    }
+  if (!this->active_.load(std::memory_order_acquire) ||
+      this->client_.socket.load() < 0 ||
+      !this->client_.streaming.load()) {
     return;
-  }
-
-  if (this->client_.socket.load() < 0) {
-    drop_socket++;
-    if (drop_socket <= 5 || drop_socket % 100 == 0) {
-      ESP_LOGW(TAG, "Mic DROP: socket closed (total=%lu)", (unsigned long)drop_socket);
-    }
-    return;
-  }
-
-  if (!this->client_.streaming.load()) {
-    drop_streaming++;
-    if (drop_streaming <= 5 || drop_streaming % 100 == 0) {
-      ESP_LOGW(TAG, "Mic DROP: not streaming (total=%lu, socket=%d)",
-               (unsigned long)drop_streaming, this->client_.socket.load());
-    }
-    return;
-  }
-
-  if (callback_count <= 5 || callback_count % 500 == 0) {
-    ESP_LOGD(TAG, "Mic callback #%lu: len=%zu", (unsigned long)callback_count, len);
   }
 
   // Handle based on mic_bits configuration
@@ -952,15 +1018,9 @@ void IntercomApi::on_microphone_data_(const uint8_t *data, size_t len) {
       converted[i] = static_cast<int16_t>(sample);
     }
 
-    // Increased mutex timeout to avoid dropping audio data
     if (xSemaphoreTake(this->mic_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
-      size_t written = this->mic_buffer_->write(converted, num_samples * sizeof(int16_t));
+      this->mic_buffer_->write(converted, num_samples * sizeof(int16_t));
       xSemaphoreGive(this->mic_mutex_);
-      if (written == 0) {
-        ESP_LOGW(TAG, "Mic buffer full, dropping %zu samples", num_samples);
-      }
-    } else {
-      ESP_LOGW(TAG, "Mic mutex timeout, dropping %zu samples", num_samples);
     }
   } else {
     // 16-bit mic - apply gain and optional DC offset removal

@@ -91,7 +91,7 @@ external_components:
   - source:
       type: local
       path: esphome/components
-    components: [intercom_api]
+    components: [intercom_api, esp_aec]
 
 # ==============================================================================
 # I2S AUDIO BUSES
@@ -137,6 +137,15 @@ speaker:
     buffer_duration: 100ms  # ~6 chunks buffer - low latency without underrun
 
 # ==============================================================================
+# AEC (Acoustic Echo Cancellation) - ESP-SR
+# ==============================================================================
+esp_aec:
+  id: aec_processor
+  sample_rate: 16000
+  filter_length: 4          # 4 recommended for ESP32-S3
+  mode: voip_low_cost       # Best for voice intercom
+
+# ==============================================================================
 # INTERCOM API (TCP-based, port 6054)
 # ==============================================================================
 intercom_api:
@@ -145,6 +154,7 @@ intercom_api:
   speaker: spk_component
   mic_bits: 32              # SPH0645 is 32-bit I2S mic
   dc_offset_removal: true   # Required for SPH0645 (has DC bias)
+  aec_id: aec_processor     # Link to AEC component
 
 # ==============================================================================
 # VOLUME & GAIN CONTROL
@@ -180,6 +190,21 @@ number:
     set_action:
       - lambda: |-
           id(intercom).set_mic_gain_db(x);
+
+# ==============================================================================
+# SWITCHES
+# ==============================================================================
+switch:
+  - platform: template
+    id: aec_switch
+    name: "Echo Cancellation"
+    icon: "mdi:microphone-off"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - lambda: 'id(intercom).set_aec_enabled(true);'
+    turn_off_action:
+      - lambda: 'id(intercom).set_aec_enabled(false);'
 
 # ==============================================================================
 # STATUS LED (WS2812 RGB on GPIO21)

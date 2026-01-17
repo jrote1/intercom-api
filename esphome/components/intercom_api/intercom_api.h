@@ -16,6 +16,10 @@
 #include "esphome/components/switch/switch.h"
 #include "esphome/components/number/number.h"
 
+#ifdef USE_ESP_AEC
+#include "esphome/components/esp_aec/esp_aec.h"
+#endif
+
 #include "intercom_protocol.h"
 
 #include <lwip/sockets.h>
@@ -62,6 +66,12 @@ class IntercomApi : public Component {
 #endif
   void set_mic_bits(int bits) { this->mic_bits_ = bits; }
   void set_dc_offset_removal(bool enabled) { this->dc_offset_removal_ = enabled; }
+
+#ifdef USE_ESP_AEC
+  void set_aec(esp_aec::EspAec *aec) { this->aec_ = aec; }
+  void set_aec_enabled(bool enabled);
+  bool is_aec_enabled() const { return this->aec_enabled_; }
+#endif
 
   // Runtime control
   void start();
@@ -174,6 +184,24 @@ class IntercomApi : public Component {
   int mic_bits_{16};              // 16 or 32 bit mic
   bool dc_offset_removal_{false}; // Enable for mics with DC bias (SPH0645)
   int32_t dc_offset_{0};          // Running DC offset value
+
+#ifdef USE_ESP_AEC
+  // AEC (Acoustic Echo Cancellation)
+  esp_aec::EspAec *aec_{nullptr};
+  bool aec_enabled_{false};
+
+  // Speaker reference buffer for AEC (fed by speaker_task)
+  std::unique_ptr<RingBuffer> spk_ref_buffer_;
+  SemaphoreHandle_t spk_ref_mutex_{nullptr};
+
+  // AEC frame accumulation (frame_size = 512 samples = 32ms at 16kHz)
+  int aec_frame_samples_{0};
+  int16_t *aec_mic_{nullptr};   // Accumulated mic samples (frame_size)
+  int16_t *aec_ref_{nullptr};   // Speaker reference samples (frame_size)
+  int16_t *aec_out_{nullptr};   // AEC output samples (frame_size)
+  size_t aec_mic_fill_{0};      // Current fill level in aec_mic_
+  size_t aec_ref_fill_{0};      // Current fill level in aec_ref_
+#endif
 
   // Triggers
   Trigger<> connect_trigger_;
