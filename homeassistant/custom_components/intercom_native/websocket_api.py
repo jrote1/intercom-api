@@ -26,9 +26,14 @@ WS_TYPE_START = f"{DOMAIN}/start"
 WS_TYPE_STOP = f"{DOMAIN}/stop"
 WS_TYPE_AUDIO = f"{DOMAIN}/audio"
 WS_TYPE_LIST = f"{DOMAIN}/list_devices"
+WS_TYPE_BRIDGE = f"{DOMAIN}/bridge"
+WS_TYPE_BRIDGE_STOP = f"{DOMAIN}/bridge_stop"
 
 # Active sessions: device_id -> IntercomSession
 _sessions: Dict[str, "IntercomSession"] = {}
+
+# Active bridges: bridge_id -> BridgeSession
+_bridges: Dict[str, "BridgeSession"] = {}
 
 
 class IntercomSession:
@@ -177,12 +182,175 @@ class IntercomSession:
             pass  # Drop silently - low latency > perfect audio
 
 
+class BridgeSession:
+    """Manages audio bridge between two ESP devices (PTMP mode)."""
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        bridge_id: str,
+        source_device_id: str,
+        source_host: str,
+        dest_device_id: str,
+        dest_host: str,
+    ):
+        """Initialize bridge session."""
+        self.hass = hass
+        self.bridge_id = bridge_id
+        self.source_device_id = source_device_id
+        self.source_host = source_host
+        self.dest_device_id = dest_device_id
+        self.dest_host = dest_host
+
+        self._source_client: Optional[IntercomTcpClient] = None
+        self._dest_client: Optional[IntercomTcpClient] = None
+        self._active = False
+
+    async def start(self) -> str:
+        """Start the bridge session.
+
+        Returns:
+            "connected" - Both ESPs connected, bridge active
+            "error" - Connection failed
+        """
+        if self._active:
+            return "connected"
+
+        bridge = self
+
+        # Audio from source -> dest
+        def on_source_audio(data: bytes) -> None:
+            if not bridge._active or not bridge._dest_client:
+                return
+            asyncio.create_task(bridge._dest_client.send_audio(data))
+
+        # Audio from dest -> source
+        def on_dest_audio(data: bytes) -> None:
+            if not bridge._active or not bridge._source_client:
+                return
+            asyncio.create_task(bridge._source_client.send_audio(data))
+
+        def on_source_disconnected() -> None:
+            _LOGGER.debug("Bridge source disconnected: %s", bridge.bridge_id)
+            asyncio.create_task(bridge.stop())
+            bridge.hass.bus.async_fire(
+                "intercom_bridge_state",
+                {
+                    "bridge_id": bridge.bridge_id,
+                    "source_device_id": bridge.source_device_id,
+                    "dest_device_id": bridge.dest_device_id,
+                    "state": "disconnected",
+                }
+            )
+
+        def on_dest_disconnected() -> None:
+            _LOGGER.debug("Bridge dest disconnected: %s", bridge.bridge_id)
+            asyncio.create_task(bridge.stop())
+            bridge.hass.bus.async_fire(
+                "intercom_bridge_state",
+                {
+                    "bridge_id": bridge.bridge_id,
+                    "source_device_id": bridge.source_device_id,
+                    "dest_device_id": bridge.dest_device_id,
+                    "state": "disconnected",
+                }
+            )
+
+        def on_source_answered() -> None:
+            _LOGGER.debug("Bridge source answered: %s", bridge.bridge_id)
+            bridge._check_both_connected()
+
+        def on_dest_answered() -> None:
+            _LOGGER.debug("Bridge dest answered: %s", bridge.bridge_id)
+            bridge._check_both_connected()
+
+        # Create TCP clients for both ESPs
+        self._source_client = IntercomTcpClient(
+            host=self.source_host,
+            port=INTERCOM_PORT,
+            on_audio=on_source_audio,
+            on_disconnected=on_source_disconnected,
+            on_ringing=lambda: None,
+            on_answered=on_source_answered,
+        )
+
+        self._dest_client = IntercomTcpClient(
+            host=self.dest_host,
+            port=INTERCOM_PORT,
+            on_audio=on_dest_audio,
+            on_disconnected=on_dest_disconnected,
+            on_ringing=lambda: None,
+            on_answered=on_dest_answered,
+        )
+
+        # Connect to both ESPs
+        source_connected = await self._source_client.connect()
+        if not source_connected:
+            _LOGGER.error("Bridge: failed to connect to source %s", self.source_host)
+            return "error"
+
+        dest_connected = await self._dest_client.connect()
+        if not dest_connected:
+            _LOGGER.error("Bridge: failed to connect to dest %s", self.dest_host)
+            await self._source_client.disconnect()
+            return "error"
+
+        # Start streaming on both
+        source_result = await self._source_client.start_stream()
+        dest_result = await self._dest_client.start_stream()
+
+        if source_result == "error" or dest_result == "error":
+            _LOGGER.error("Bridge: failed to start stream")
+            await self._source_client.disconnect()
+            await self._dest_client.disconnect()
+            return "error"
+
+        self._active = True
+        _LOGGER.info("Bridge started: %s <-> %s", self.source_host, self.dest_host)
+
+        self.hass.bus.async_fire(
+            "intercom_bridge_state",
+            {
+                "bridge_id": self.bridge_id,
+                "source_device_id": self.source_device_id,
+                "dest_device_id": self.dest_device_id,
+                "state": "connected",
+            }
+        )
+
+        return "connected"
+
+    def _check_both_connected(self) -> None:
+        """Check if both ESPs are streaming and fire connected event."""
+        # This is called when either side answers
+        # For now we assume connected after start_stream succeeds
+        pass
+
+    async def stop(self) -> None:
+        """Stop the bridge session."""
+        self._active = False
+
+        if self._source_client:
+            await self._source_client.stop_stream()
+            await self._source_client.disconnect()
+            self._source_client = None
+
+        if self._dest_client:
+            await self._dest_client.stop_stream()
+            await self._dest_client.disconnect()
+            self._dest_client = None
+
+        _LOGGER.debug("Bridge stopped: %s", self.bridge_id)
+
+
 def async_register_websocket_api(hass: HomeAssistant) -> None:
     """Register WebSocket API commands."""
     websocket_api.async_register_command(hass, websocket_start)
     websocket_api.async_register_command(hass, websocket_stop)
     websocket_api.async_register_command(hass, websocket_audio)
     websocket_api.async_register_command(hass, websocket_list_devices)
+    websocket_api.async_register_command(hass, websocket_bridge)
+    websocket_api.async_register_command(hass, websocket_bridge_stop)
 
 
 @websocket_api.websocket_command(
@@ -344,3 +512,92 @@ def websocket_list_devices(
             })
 
     connection.send_result(msg["id"], {"devices": devices})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): WS_TYPE_BRIDGE,
+        vol.Required("source_device_id"): str,
+        vol.Required("source_host"): str,
+        vol.Required("dest_device_id"): str,
+        vol.Required("dest_host"): str,
+    }
+)
+@websocket_api.async_response
+async def websocket_bridge(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: Dict[str, Any],
+) -> None:
+    """Start bridge between two ESP devices (PTMP mode)."""
+    source_device_id = msg["source_device_id"]
+    source_host = msg["source_host"]
+    dest_device_id = msg["dest_device_id"]
+    dest_host = msg["dest_host"]
+    msg_id = msg["id"]
+
+    # Create unique bridge ID
+    bridge_id = f"{source_device_id}_{dest_device_id}"
+
+    _LOGGER.info(
+        "Bridge request: %s (%s) <-> %s (%s)",
+        source_device_id, source_host,
+        dest_device_id, dest_host
+    )
+
+    try:
+        # Stop existing bridge if any
+        if bridge_id in _bridges:
+            old_bridge = _bridges.pop(bridge_id)
+            await old_bridge.stop()
+
+        # Also stop any P2P sessions for these devices
+        for device_id in [source_device_id, dest_device_id]:
+            if device_id in _sessions:
+                old_session = _sessions.pop(device_id)
+                await old_session.stop()
+
+        bridge = BridgeSession(
+            hass=hass,
+            bridge_id=bridge_id,
+            source_device_id=source_device_id,
+            source_host=source_host,
+            dest_device_id=dest_device_id,
+            dest_host=dest_host,
+        )
+
+        result = await bridge.start()
+
+        if result == "connected":
+            _bridges[bridge_id] = bridge
+            connection.send_result(msg_id, {"success": True, "bridge_id": bridge_id})
+        else:
+            connection.send_error(msg_id, "bridge_failed", "Failed to establish bridge")
+
+    except Exception as err:
+        _LOGGER.exception("Bridge exception: %s", err)
+        connection.send_error(msg_id, "exception", str(err))
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): WS_TYPE_BRIDGE_STOP,
+        vol.Required("bridge_id"): str,
+    }
+)
+@websocket_api.async_response
+async def websocket_bridge_stop(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: Dict[str, Any],
+) -> None:
+    """Stop a bridge session."""
+    bridge_id = msg["bridge_id"]
+    msg_id = msg["id"]
+
+    bridge = _bridges.pop(bridge_id, None)
+    if bridge:
+        await bridge.stop()
+        _LOGGER.debug("Bridge stopped: %s", bridge_id)
+
+    connection.send_result(msg_id, {"success": True})

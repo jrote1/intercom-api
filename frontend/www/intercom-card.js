@@ -1,12 +1,17 @@
 /**
- * Intercom Card v1.0.0 - Lovelace custom card for intercom_native integration
+ * Intercom Card v2.0.0 - Lovelace custom card for intercom_native integration
  *
- * P2P Mode: Single ESP device streaming to Home Assistant browser
+ * P2P Mode: Browser <-> Home Assistant <-> ESP
  * - Card editor: select which intercom device this card represents
  * - Runtime: Call/Hangup button for bidirectional audio
+ *
+ * PTMP Mode: ESP <-> Home Assistant <-> ESP (Point-to-MultiPoint)
+ * - Card editor: select device + mode
+ * - Runtime: Destination selector + Call/Hangup button
+ * - Audio bridged through HA between two ESP devices
  */
 
-const INTERCOM_CARD_VERSION = "1.0.0";
+const INTERCOM_CARD_VERSION = "2.0.0";
 
 class IntercomCard extends HTMLElement {
   constructor() {
@@ -29,6 +34,9 @@ class IntercomCard extends HTMLElement {
     this._chunksSent = 0;
     this._chunksReceived = 0;
     this._activeDeviceInfo = null;  // Device info during active call
+    // PTMP mode
+    this._availableDevices = [];    // List of all intercom devices for destination select
+    this._selectedDestination = null;  // Selected destination device in PTMP mode
   }
 
   setConfig(config) {
@@ -46,8 +54,33 @@ class IntercomCard extends HTMLElement {
     return this.config?.entity_id || this.config?.device_id;
   }
 
+  _isPtmpMode() {
+    return this.config?.mode === "ptmp";
+  }
+
   set hass(hass) {
     this._hass = hass;
+    // Load available devices for PTMP destination selector
+    if (hass && this._isPtmpMode() && this._availableDevices.length === 0) {
+      this._loadAvailableDevices();
+    }
+  }
+
+  async _loadAvailableDevices() {
+    if (!this._hass) return;
+    try {
+      const result = await this._hass.connection.sendMessagePromise({
+        type: "intercom_native/list_devices",
+      });
+      if (result && result.devices) {
+        // Exclude the current device from destinations
+        const currentDeviceId = this._getConfigDeviceId();
+        this._availableDevices = result.devices.filter(d => d.device_id !== currentDeviceId);
+        this._render();
+      }
+    } catch (err) {
+      console.error("Failed to load available devices:", err);
+    }
   }
 
   _render() {
@@ -92,6 +125,14 @@ class IntercomCard extends HTMLElement {
                         this._ringing ? "ringing" :
                         this._active ? "connected" : "disconnected";
 
+    // Build destination options for PTMP mode
+    const isPtmp = this._isPtmpMode();
+    const destinationOptions = isPtmp
+      ? this._availableDevices.map(d =>
+          `<option value="${d.device_id}" ${this._selectedDestination === d.device_id ? 'selected' : ''}>${d.name}</option>`
+        ).join('')
+      : '';
+
     this.shadowRoot.innerHTML = `
       <style>
         :host { display: block; }
@@ -102,6 +143,35 @@ class IntercomCard extends HTMLElement {
           padding: 16px;
         }
         .header { font-size: 1.2em; font-weight: 500; margin-bottom: 16px; color: var(--primary-text-color); }
+
+        .destination-selector {
+          margin-bottom: 16px;
+        }
+        .destination-selector label {
+          display: block;
+          font-size: 0.85em;
+          color: var(--secondary-text-color);
+          margin-bottom: 4px;
+        }
+        .destination-selector select {
+          width: 100%;
+          padding: 8px 12px;
+          border: 1px solid var(--divider-color, #ccc);
+          border-radius: 8px;
+          background: var(--card-background-color, white);
+          color: var(--primary-text-color);
+          font-size: 1em;
+        }
+        .mode-badge {
+          display: inline-block;
+          font-size: 0.7em;
+          padding: 2px 6px;
+          border-radius: 4px;
+          margin-left: 8px;
+          vertical-align: middle;
+        }
+        .mode-badge.p2p { background: #4caf50; color: white; }
+        .mode-badge.ptmp { background: #2196f3; color: white; }
 
         .button-container { display: flex; justify-content: center; margin-bottom: 16px; }
         .intercom-button {
@@ -134,18 +204,30 @@ class IntercomCard extends HTMLElement {
         .version { font-size: 0.65em; color: #999; text-align: right; margin-top: 8px; }
       </style>
       <div class="card">
-        <div class="header">${name}</div>
+        <div class="header">
+          ${name}
+          <span class="mode-badge ${isPtmp ? 'ptmp' : 'p2p'}">${isPtmp ? 'PTMP' : 'P2P'}</span>
+        </div>
+        ${isPtmp ? `
+        <div class="destination-selector">
+          <label>Destination</label>
+          <select id="destination-select">
+            <option value="">-- Select destination --</option>
+            ${destinationOptions}
+          </select>
+        </div>
+        ` : ''}
         <div class="button-container">
           <button class="intercom-button ${this._active ? "hangup" : this._ringing ? "ringing" : "call"}" id="btn"
-                  ${this._starting || this._stopping ? "disabled" : ""}>
-            ${this._stopping ? "..." : this._active || this._ringing ? "Hangup" : "Call"}
+                  ${this._starting || this._stopping || (isPtmp && !this._selectedDestination && !this._active) ? "disabled" : ""}>
+            ${this._stopping ? "..." : this._active || this._ringing ? "Hangup" : isPtmp ? "Bridge" : "Call"}
           </button>
         </div>
         <div class="status">
           <span class="status-indicator ${statusClass}"></span>
           ${statusText}
         </div>
-        <div class="stats" id="stats">Sent: 0 | Recv: 0</div>
+        <div class="stats" id="stats">${isPtmp ? 'Bridge ready' : 'Sent: 0 | Recv: 0'}</div>
         <div class="error" id="err"></div>
         <div class="version">v${INTERCOM_CARD_VERSION}</div>
       </div>
@@ -153,6 +235,15 @@ class IntercomCard extends HTMLElement {
 
     const btn = this.shadowRoot.getElementById("btn");
     if (btn) btn.onclick = () => this._toggle();
+
+    // PTMP destination selector
+    const destSelect = this.shadowRoot.getElementById("destination-select");
+    if (destSelect) {
+      destSelect.onchange = (e) => {
+        this._selectedDestination = e.target.value || null;
+        this._render();
+      };
+    }
   }
 
   _updateStats() {
@@ -167,7 +258,13 @@ class IntercomCard extends HTMLElement {
 
   async _toggle() {
     if (this._starting || this._stopping) return;
-    (this._active || this._ringing) ? await this._hangup() : await this._call();
+    if (this._active || this._ringing) {
+      await this._hangup();
+    } else if (this._isPtmpMode()) {
+      await this._bridge();
+    } else {
+      await this._call();
+    }
   }
 
   async _call() {
@@ -261,6 +358,66 @@ class IntercomCard extends HTMLElement {
       console.error("Failed to get device info:", err);
     }
     return null;
+  }
+
+  async _bridge() {
+    // PTMP mode: bridge audio between source ESP and destination ESP
+    const sourceDeviceInfo = await this._getDeviceInfo();
+    if (!sourceDeviceInfo || !sourceDeviceInfo.host) {
+      this._showError("Source device IP not available");
+      return;
+    }
+
+    const destDevice = this._availableDevices.find(d => d.device_id === this._selectedDestination);
+    if (!destDevice || !destDevice.host) {
+      this._showError("Destination device not selected or IP not available");
+      return;
+    }
+
+    this._activeDeviceInfo = sourceDeviceInfo;
+    this._starting = true;
+    this._render();
+    this._showError("");
+
+    try {
+      const result = await this._hass.connection.sendMessagePromise({
+        type: "intercom_native/bridge",
+        source_device_id: sourceDeviceInfo.device_id,
+        source_host: sourceDeviceInfo.host,
+        dest_device_id: destDevice.device_id,
+        dest_host: destDevice.host,
+      });
+
+      if (!result.success) throw new Error(result.error || "Bridge failed");
+
+      // Subscribe to state events for bridge status
+      this._unsubscribeState = await this._hass.connection.subscribeEvents(
+        (e) => this._handleBridgeStateEvent(e), "intercom_bridge_state"
+      );
+
+      this._active = true;
+      this._starting = false;
+      this._render();
+    } catch (err) {
+      this._showError(err.message || String(err));
+      this._starting = false;
+      this._render();
+    }
+  }
+
+  _handleBridgeStateEvent(event) {
+    if (!event.data || !this._activeDeviceInfo) return;
+    // Check if this event is for our bridge session
+    if (event.data.source_device_id !== this._activeDeviceInfo.device_id &&
+        event.data.dest_device_id !== this._selectedDestination) return;
+
+    const state = event.data.state;
+    if (state === "connected") {
+      this._active = true;
+      this._render();
+    } else if (state === "disconnected") {
+      this._hangup();
+    }
   }
 
   async _hangup() {
@@ -426,6 +583,8 @@ class IntercomCardEditor extends HTMLElement {
       </option>`
     ).join('');
 
+    const currentMode = this._config.mode || 'p2p';
+
     this.innerHTML = `
       <style>
         .form-group {
@@ -473,6 +632,38 @@ class IntercomCardEditor extends HTMLElement {
           color: var(--secondary-text-color);
           font-size: 0.9em;
         }
+        .mode-selector {
+          display: flex;
+          gap: 8px;
+          margin-top: 8px;
+        }
+        .mode-btn {
+          flex: 1;
+          padding: 12px;
+          border: 2px solid var(--divider-color, #ccc);
+          border-radius: 8px;
+          background: var(--card-background-color, white);
+          cursor: pointer;
+          text-align: center;
+          transition: all 0.2s;
+        }
+        .mode-btn:hover {
+          border-color: var(--primary-color, #03a9f4);
+        }
+        .mode-btn.selected {
+          border-color: var(--primary-color, #03a9f4);
+          background: var(--primary-color, #03a9f4);
+          color: white;
+        }
+        .mode-btn .mode-title {
+          font-weight: bold;
+          font-size: 1.1em;
+        }
+        .mode-btn .mode-desc {
+          font-size: 0.8em;
+          opacity: 0.8;
+          margin-top: 4px;
+        }
       </style>
       <div style="padding: 16px;">
         <div class="form-group">
@@ -491,10 +682,28 @@ class IntercomCardEditor extends HTMLElement {
           <label>Card Name (optional)</label>
           <input type="text" id="name-input" value="${this._config.name || ''}" placeholder="Intercom">
         </div>
+        <div class="form-group">
+          <label>Mode</label>
+          <div class="mode-selector">
+            <div class="mode-btn ${currentMode === 'p2p' ? 'selected' : ''}" id="mode-p2p">
+              <div class="mode-title">P2P</div>
+              <div class="mode-desc">Browser ↔ ESP</div>
+            </div>
+            <div class="mode-btn ${currentMode === 'ptmp' ? 'selected' : ''}" id="mode-ptmp">
+              <div class="mode-title">PTMP</div>
+              <div class="mode-desc">ESP ↔ ESP</div>
+            </div>
+          </div>
+        </div>
         <div class="mode-info">
-          <h4>P2P Mode</h4>
-          <p>Direct audio streaming between this browser and the selected ESP device.</p>
-          <p style="margin-top: 8px; font-style: italic; color: #888;">PTMP mode (multi-device) coming soon!</p>
+          ${currentMode === 'p2p' ? `
+            <h4>P2P Mode</h4>
+            <p>Direct audio streaming between this browser and the selected ESP device.</p>
+          ` : `
+            <h4>PTMP Mode (Point-to-MultiPoint)</h4>
+            <p>Bridge audio between the selected ESP device and another ESP device.</p>
+            <p style="margin-top: 8px;">The card will show a destination selector at runtime.</p>
+          `}
         </div>
       </div>
     `;
@@ -508,6 +717,11 @@ class IntercomCardEditor extends HTMLElement {
     if (nameInput) {
       nameInput.onchange = (e) => this._valueChanged('name', e.target.value);
     }
+
+    const modeP2p = this.querySelector('#mode-p2p');
+    const modePtmp = this.querySelector('#mode-ptmp');
+    if (modeP2p) modeP2p.onclick = () => this._valueChanged('mode', 'p2p');
+    if (modePtmp) modePtmp.onclick = () => this._valueChanged('mode', 'ptmp');
   }
 
   _valueChanged(key, value) {
@@ -534,6 +748,6 @@ window.customCards = window.customCards || [];
 window.customCards.push({
   type: "intercom-card",
   name: "Intercom Card",
-  description: "Bidirectional audio intercom with ESP32 (P2P mode)",
+  description: "Bidirectional audio intercom with ESP32 (P2P and PTMP modes)",
   preview: true,
 });

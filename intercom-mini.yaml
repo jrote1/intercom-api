@@ -30,6 +30,7 @@
 substitutions:
   name: intercom-mini
   friendly_name: Intercom Mini
+  ringing_timeout: "30s"  # Timeout for unanswered calls
 
 esphome:
   name: ${name}
@@ -46,6 +47,11 @@ esphome:
           id(intercom).set_volume(vol);
           // Restore mic gain from saved state (dB)
           id(intercom).set_mic_gain_db(id(mic_gain).state);
+          // Initialize contacts with Home Assistant as default
+          if (id(contacts).empty()) {
+            id(contacts).push_back("Home Assistant");
+            id(peer_name) = "Home Assistant";
+          }
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -154,6 +160,60 @@ intercom_api:
   mic_bits: 32              # SPH0645 is 32-bit I2S mic
   dc_offset_removal: true   # Required for SPH0645 (has DC bias)
   aec_id: aec_processor     # Link to AEC component
+
+# ==============================================================================
+# GLOBALS
+# ==============================================================================
+globals:
+  - id: peer_name
+    type: std::string
+    restore_value: no
+    initial_value: '"Home Assistant"'
+
+  - id: contacts
+    type: std::vector<std::string>
+    restore_value: no
+
+  - id: contact_index
+    type: int
+    restore_value: yes
+    initial_value: '0'
+
+# ==============================================================================
+# SCRIPTS
+# ==============================================================================
+script:
+  # Ringing timeout - returns to Idle if no one answers
+  - id: ringing_timeout_script
+    mode: restart  # Restart if called again (resets timer)
+    then:
+      - logger.log: "Ringing timeout started (${ringing_timeout})"
+      - delay: ${ringing_timeout}
+      - lambda: |-
+          std::string state = id(intercom_state).state;
+          if (state == "Ringing" || state == "Calling") {
+            ESP_LOGI("intercom", "Ringing timeout - returning to Idle");
+            id(intercom).stop();
+            id(peer_name) = "Home Assistant";
+          }
+
+  # Cancel ringing timeout (called when call is answered)
+  - id: stop_ringing_timeout
+    then:
+      - script.stop: ringing_timeout_script
+      - logger.log: "Ringing timeout cancelled"
+
+  # Cycle to next contact
+  - id: next_contact
+    then:
+      - lambda: |-
+          if (id(contacts).empty()) {
+            ESP_LOGW("intercom", "No contacts available");
+            return;
+          }
+          id(contact_index) = (id(contact_index) + 1) % id(contacts).size();
+          id(peer_name) = id(contacts)[id(contact_index)];
+          ESP_LOGI("intercom", "Selected contact: %s", id(peer_name).c_str());
 
 # ==============================================================================
 # VOLUME & GAIN CONTROL
@@ -267,6 +327,14 @@ text_sensor:
                   red: 100%
                   green: 0%
                   blue: 0%
+              - script.execute: ringing_timeout_script
+        - if:
+            condition:
+              text_sensor.state:
+                id: intercom_state
+                state: "Calling"
+            then:
+              - script.execute: ringing_timeout_script
         - if:
             condition:
               text_sensor.state:
@@ -279,6 +347,7 @@ text_sensor:
                   red: 0%
                   green: 100%
                   blue: 0%
+              - script.execute: stop_ringing_timeout
         - if:
             condition:
               text_sensor.state:
@@ -287,6 +356,15 @@ text_sensor:
             then:
               - light.turn_off:
                   id: status_led
+              - script.execute: stop_ringing_timeout
+              - lambda: 'id(peer_name) = "Home Assistant";'
+
+  # Peer name (set by HA when bridging)
+  - platform: template
+    id: call_peer
+    name: "Call Peer"
+    lambda: 'return id(peer_name);'
+    update_interval: 1s
 
 # ==============================================================================
 # DIAGNOSTICS
@@ -329,6 +407,50 @@ button:
           // IDLE: Start call to Home Assistant
           id(intercom).start();
 
+  - platform: template
+    id: next_contact_button
+    name: "Next Contact"
+    icon: "mdi:account-arrow-right"
+    on_press:
+      - script.execute: next_contact
+
   - platform: restart
     name: "Restart"
     icon: "mdi:restart"
+
+# ==============================================================================
+# CONTACTS (received from HA)
+# ==============================================================================
+text:
+  - platform: template
+    id: contacts_data
+    name: "Contacts"
+    mode: text
+    entity_category: config
+    optimistic: true
+    on_value:
+      then:
+        - lambda: |-
+            // Parse contacts from HA: "Home Assistant,Cucina,Camera"
+            id(contacts).clear();
+            std::string data = x;
+            if (data.empty()) {
+              id(contacts).push_back("Home Assistant");
+            } else {
+              size_t pos;
+              while (!data.empty()) {
+                pos = data.find(',');
+                std::string name = (pos != std::string::npos) ? data.substr(0, pos) : data;
+                if (!name.empty()) {
+                  id(contacts).push_back(name);
+                }
+                if (pos == std::string::npos) break;
+                data.erase(0, pos + 1);
+              }
+            }
+            // Reset index and select first contact
+            id(contact_index) = 0;
+            if (!id(contacts).empty()) {
+              id(peer_name) = id(contacts)[0];
+            }
+            ESP_LOGI("intercom", "Loaded %d contacts", id(contacts).size());
