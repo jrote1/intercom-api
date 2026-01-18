@@ -74,8 +74,6 @@ external_components:
     components: [intercom_api, esp_aec]
 ```
 
-![ESPHome Add Device](readme-img/esphome-add-device.png)
-
 ### 2. Basic ESPHome Configuration
 
 ```yaml
@@ -157,6 +155,8 @@ Add the Intercom Card to your dashboard:
 The card automatically discovers ESPHome devices with the `intercom_api` component.
 
 > **Important**: Devices must first be added to Home Assistant via the ESPHome integration (autodiscovery or manually) before they appear in the card's device list.
+
+![ESPHome Add Device](readme-img/esphome-add-device.png)
 
 ---
 
