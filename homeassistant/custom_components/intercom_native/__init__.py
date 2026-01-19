@@ -12,13 +12,14 @@ import logging
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
+from homeassistant.helpers.discovery import async_load_platform
 
 from .const import DOMAIN
 from .websocket_api import async_register_websocket_api
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = []
+PLATFORMS: list[Platform] = [Platform.SENSOR]
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
@@ -27,6 +28,11 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 
     # Register WebSocket API commands
     async_register_websocket_api(hass)
+
+    # Load sensor platform (creates sensor.intercom_active_devices)
+    hass.async_create_task(
+        async_load_platform(hass, Platform.SENSOR, DOMAIN, {}, config)
+    )
 
     _LOGGER.info("Intercom Native integration loaded (P2P mode)")
     return True

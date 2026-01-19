@@ -11,7 +11,7 @@
  * - Audio bridged through HA between two ESP devices
  */
 
-const INTERCOM_CARD_VERSION = "3.1.0";
+const INTERCOM_CARD_VERSION = "3.2.0";
 
 class IntercomCard extends HTMLElement {
   constructor() {
@@ -318,13 +318,16 @@ class IntercomCard extends HTMLElement {
         .mode-badge.p2p { background: #4caf50; color: white; }
         .mode-badge.ptmp { background: #2196f3; color: white; }
 
-        .button-container { display: flex; justify-content: center; margin-bottom: 16px; }
+        .button-container { display: flex; justify-content: center; gap: 20px; margin-bottom: 16px; }
         .intercom-button {
           width: 100px; height: 100px; border-radius: 50%; border: none; cursor: pointer;
           font-size: 1em; font-weight: bold; transition: all 0.2s ease;
           display: flex; align-items: center; justify-content: center;
         }
+        .intercom-button.small { width: 80px; height: 80px; font-size: 0.9em; }
         .intercom-button.call { background: #4caf50; color: white; }
+        .intercom-button.answer { background: #4caf50; color: white; animation: ring-pulse 1s infinite; }
+        .intercom-button.decline { background: #f44336; color: white; }
         .intercom-button.hangup { background: #f44336; color: white; animation: pulse 1.5s infinite; }
         .intercom-button.ringing { background: #ff9800; color: white; animation: ring-pulse 1s infinite; }
         .intercom-button:disabled { opacity: 0.5; cursor: not-allowed; animation: none; }
@@ -364,10 +367,19 @@ class IntercomCard extends HTMLElement {
         </div>
         ` : ''}
         <div class="button-container">
-          <button class="intercom-button ${this._active || this._calling ? "hangup" : this._ringing ? "ringing" : "call"}" id="btn"
-                  ${this._starting || this._stopping || (isPtmp && !currentDestination && !this._active && !this._calling && !this._ringing) ? "disabled" : ""}>
-            ${this._stopping ? "..." : this._ringing ? "Answer" : this._active || this._calling ? "Hangup" : "Call"}
+          ${this._ringing ? `
+          <button class="intercom-button small answer" id="answer-btn" ${this._starting || this._stopping ? "disabled" : ""}>
+            Answer
           </button>
+          <button class="intercom-button small decline" id="decline-btn" ${this._stopping ? "disabled" : ""}>
+            Decline
+          </button>
+          ` : `
+          <button class="intercom-button ${this._active || this._calling ? "hangup" : "call"}" id="btn"
+                  ${this._starting || this._stopping || (isPtmp && !currentDestination && !this._active && !this._calling) ? "disabled" : ""}>
+            ${this._stopping ? "..." : this._active || this._calling ? "Hangup" : "Call"}
+          </button>
+          `}
         </div>
         <div class="status">
           <span class="status-indicator ${statusClass}"></span>
@@ -379,8 +391,15 @@ class IntercomCard extends HTMLElement {
       </div>
     `;
 
+    // Single button (call/hangup) when not ringing
     const btn = this.shadowRoot.getElementById("btn");
     if (btn) btn.onclick = () => this._toggle();
+
+    // Two buttons when ringing: Answer and Decline
+    const answerBtn = this.shadowRoot.getElementById("answer-btn");
+    const declineBtn = this.shadowRoot.getElementById("decline-btn");
+    if (answerBtn) answerBtn.onclick = () => this._answerIncoming();
+    if (declineBtn) declineBtn.onclick = () => this._declineIncoming();
 
     // PTMP prev/next buttons - press ESP buttons to cycle contacts
     const prevBtn = this.shadowRoot.getElementById("prev-btn");
@@ -487,6 +506,36 @@ class IntercomCard extends HTMLElement {
       this._showError(err.message || String(err));
     } finally {
       this._starting = false;
+      this._render();
+    }
+  }
+
+  async _declineIncoming() {
+    // Decline an incoming call - stop the session without answering
+    const deviceInfo = await this._getDeviceInfo();
+    if (!deviceInfo?.device_id) {
+      this._showError("Device not found");
+      return;
+    }
+
+    this._stopping = true;
+    this._render();
+
+    try {
+      // Send stop to terminate the session
+      await this._hass.connection.sendMessagePromise({
+        type: "intercom_native/stop",
+        device_id: deviceInfo.device_id,
+      });
+
+      this._ringing = false;
+      this._calling = false;
+      this._active = false;
+      this._showError("");
+    } catch (err) {
+      this._showError(err.message || String(err));
+    } finally {
+      this._stopping = false;
       this._render();
     }
   }

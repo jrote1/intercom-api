@@ -639,8 +639,8 @@ async def websocket_list_devices(
     """List ESPHome devices with intercom capability."""
     devices = await _get_intercom_devices(hass)
 
-    # Automatically sync contacts to all ESP devices
-    await _sync_contacts_to_all_devices(hass, devices)
+    # Note: Contacts are now managed via sensor.intercom_active_devices
+    # ESPs subscribe to this sensor and update their contacts automatically
 
     connection.send_result(msg["id"], {"devices": devices})
 
@@ -718,46 +718,6 @@ async def _get_intercom_devices(hass: HomeAssistant) -> list:
             })
 
     return devices
-
-
-async def _sync_contacts_to_all_devices(hass: HomeAssistant, devices: list) -> None:
-    """Sync contacts list to all intercom ESP devices."""
-    from homeassistant.helpers import entity_registry as er
-
-    entity_registry = er.async_get(hass)
-
-    for device in devices:
-        device_id = device["device_id"]
-        device_name = device["name"]
-
-        # Build contacts list for this device: "Home Assistant" + all other devices
-        contacts = ["Home Assistant"]
-        for other_device in devices:
-            if other_device["device_id"] != device_id:
-                contacts.append(other_device["name"])
-
-        contacts_str = ",".join(contacts)
-
-        # Find contacts_data text entity for this device
-        for entity in entity_registry.entities.values():
-            if entity.device_id == device_id and "contacts" in entity.entity_id.lower():
-                try:
-                    # Check current value to avoid unnecessary updates
-                    current_state = hass.states.get(entity.entity_id)
-                    if current_state and current_state.state == contacts_str:
-                        _LOGGER.debug("Contacts already synced for %s", device_name)
-                        continue
-
-                    await hass.services.async_call(
-                        "text",
-                        "set_value",
-                        {"entity_id": entity.entity_id, "value": contacts_str},
-                        blocking=True,
-                    )
-                    _LOGGER.info("Synced contacts to %s: %s", device_name, contacts_str)
-                except Exception as err:
-                    _LOGGER.warning("Failed to sync contacts to %s: %s", device_name, err)
-                break
 
 
 @websocket_api.websocket_command(

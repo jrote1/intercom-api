@@ -324,6 +324,46 @@ light:
 # TEXT SENSORS (status)
 # ==============================================================================
 text_sensor:
+  # Subscribe to HA's active devices sensor - automatically updated when devices connect/disconnect
+  - platform: homeassistant
+    id: ha_active_devices
+    entity_id: sensor.intercom_active_devices
+    on_value:
+      then:
+        - lambda: |-
+            // Parse contacts from HA sensor: "Home Assistant,Intercom Mini,Intercom Xiaozhi"
+            // This ESP should NOT appear in its own contacts list
+            id(contacts).clear();
+            std::string data = x;
+            std::string my_name = "${friendly_name}";
+            if (data.empty()) {
+              id(contacts).push_back("Home Assistant");
+            } else {
+              size_t pos;
+              while (!data.empty()) {
+                pos = data.find(',');
+                std::string name = (pos != std::string::npos) ? data.substr(0, pos) : data;
+                // Trim whitespace
+                while (!name.empty() && name[0] == ' ') name.erase(0, 1);
+                while (!name.empty() && name[name.size()-1] == ' ') name.erase(name.size()-1);
+                // Add if not empty and not this device
+                if (!name.empty() && name != my_name) {
+                  id(contacts).push_back(name);
+                }
+                if (pos == std::string::npos) break;
+                data.erase(0, pos + 1);
+              }
+            }
+            // Ensure at least "Home Assistant" is available
+            if (id(contacts).empty()) {
+              id(contacts).push_back("Home Assistant");
+            }
+            // Reset to first contact and update display
+            id(contact_index) = 0;
+            id(peer_name) = id(contacts)[0];
+            id(destination_sensor).update();
+            ESP_LOGI("intercom", "Contacts updated from HA: %d devices", id(contacts).size());
+
   - platform: intercom_api
     id: intercom_state
     name: "Intercom State"
@@ -447,6 +487,41 @@ button:
     on_press:
       - script.execute: next_contact
 
+  - platform: template
+    id: refresh_contacts_button
+    name: "Refresh Contacts"
+    icon: "mdi:refresh"
+    entity_category: config
+    on_press:
+      - lambda: |-
+          // Force re-read of contacts from HA sensor
+          auto val = id(ha_active_devices).state;
+          if (!val.empty()) {
+            // Manually trigger the same parsing logic
+            id(contacts).clear();
+            std::string data = val;
+            std::string my_name = "${friendly_name}";
+            size_t pos;
+            while (!data.empty()) {
+              pos = data.find(',');
+              std::string name = (pos != std::string::npos) ? data.substr(0, pos) : data;
+              while (!name.empty() && name[0] == ' ') name.erase(0, 1);
+              while (!name.empty() && name[name.size()-1] == ' ') name.erase(name.size()-1);
+              if (!name.empty() && name != my_name) {
+                id(contacts).push_back(name);
+              }
+              if (pos == std::string::npos) break;
+              data.erase(0, pos + 1);
+            }
+            if (id(contacts).empty()) {
+              id(contacts).push_back("Home Assistant");
+            }
+            id(contact_index) = 0;
+            id(peer_name) = id(contacts)[0];
+            id(destination_sensor).update();
+            ESP_LOGI("intercom", "Contacts refreshed: %d devices", id(contacts).size());
+          }
+
   - platform: restart
     name: "Restart"
     icon: "mdi:restart"
@@ -470,36 +545,4 @@ text:
               ESP_LOGI("intercom", "Incoming call from: %s", x.c_str());
             }
 
-  - platform: template
-    id: contacts_data
-    name: "Contacts"
-    mode: text
-    entity_category: config
-    optimistic: true
-    on_value:
-      then:
-        - lambda: |-
-            // Parse contacts from HA: "Home Assistant,Cucina,Camera"
-            id(contacts).clear();
-            std::string data = x;
-            if (data.empty()) {
-              id(contacts).push_back("Home Assistant");
-            } else {
-              size_t pos;
-              while (!data.empty()) {
-                pos = data.find(',');
-                std::string name = (pos != std::string::npos) ? data.substr(0, pos) : data;
-                if (!name.empty()) {
-                  id(contacts).push_back(name);
-                }
-                if (pos == std::string::npos) break;
-                data.erase(0, pos + 1);
-              }
-            }
-            // Reset to first contact and update display
-            id(contact_index) = 0;
-            if (!id(contacts).empty()) {
-              id(peer_name) = id(contacts)[0];
-            }
-            id(destination_sensor).update();
-            ESP_LOGI("intercom", "Loaded %d contacts", id(contacts).size());
+  # Note: contacts_data text entity removed - contacts now come from sensor.intercom_active_devices
