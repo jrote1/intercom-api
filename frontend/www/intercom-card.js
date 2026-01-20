@@ -11,7 +11,7 @@
  * - Audio bridged through HA between two ESP devices
  */
 
-const INTERCOM_CARD_VERSION = "3.3.0";
+const INTERCOM_CARD_VERSION = "3.3.2";
 
 class IntercomCard extends HTMLElement {
   constructor() {
@@ -168,7 +168,7 @@ class IntercomCard extends HTMLElement {
         if (entity.device_id !== haDeviceId) continue;
         const id = entity.entity_id;
         if (id.includes("intercom_state")) this._intercomStateEntityId = id;
-        else if (id.includes("incoming_caller")) this._incomingCallerEntityId = id;
+        else if (id.includes("incoming_caller") || (id.includes("_caller") && (id.startsWith("text_sensor.") || id.startsWith("sensor.")))) this._incomingCallerEntityId = id;
         else if (id.includes("destination")) this._destinationSensorEntityId = id;
         else if (id.startsWith("button.") && id.includes("previous")) this._previousButtonEntityId = id;
         else if (id.startsWith("button.") && id.includes("next")) this._nextButtonEntityId = id;
@@ -328,7 +328,7 @@ class IntercomCard extends HTMLElement {
         .intercom-button.call { background: #4caf50; color: white; }
         .intercom-button.answer { background: #4caf50; color: white; animation: ring-pulse 1s infinite; }
         .intercom-button.decline { background: #f44336; color: white; }
-        .intercom-button.hangup { background: #f44336; color: white; animation: pulse 1.5s infinite; }
+        .intercom-button.hangup { background: #f44336; color: white; animation: ring-pulse 1s infinite; }
         .intercom-button.ringing { background: #ff9800; color: white; animation: ring-pulse 1s infinite; }
         .intercom-button:disabled { opacity: 0.5; cursor: not-allowed; animation: none; }
         @keyframes pulse {

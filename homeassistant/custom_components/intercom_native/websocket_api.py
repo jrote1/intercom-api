@@ -700,7 +700,7 @@ async def _get_intercom_devices(hass: HomeAssistant) -> list:
                 eid = entity.entity_id
                 if "intercom_state" in eid and "intercom_state" not in entities:
                     entities["intercom_state"] = eid
-                elif "incoming_caller" in eid and "incoming_caller" not in entities:
+                elif ("incoming_caller" in eid or eid.endswith("_caller")) and "incoming_caller" not in entities:
                     entities["incoming_caller"] = eid
                 elif "destination" in eid and "destination" not in entities:
                     entities["destination"] = eid
