@@ -47,6 +47,7 @@ esp32:
       CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240: "y"
       CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
       CONFIG_ESP32S3_DATA_CACHE_LINE_64B: "y"
+      CONFIG_LWIP_MAX_SOCKETS: "16"
 
 psram:
   mode: quad
@@ -142,13 +143,13 @@ esp_aec:
 # ==============================================================================
 # Auto-creates these sensors:
 #   - text_sensor.intercom_mini_intercom_state (Idle/Ringing/Streaming)
-#   - text_sensor.intercom_mini_destination (selected contact) [PTMP only]
-#   - text_sensor.intercom_mini_caller (who is calling) [PTMP only]
-#   - text_sensor.intercom_mini_contacts (count) [PTMP only]
+#   - text_sensor.intercom_mini_destination (selected contact) [full mode only]
+#   - text_sensor.intercom_mini_caller (who is calling) [full mode only]
+#   - text_sensor.intercom_mini_contacts (count) [full mode only]
 
 intercom_api:
   id: intercom
-  mode: ptmp                  # Multi-device mode with contacts
+  mode: full                  # Multi-device mode with contacts, ESP↔ESP calls
   microphone: mic_component
   speaker: spk_component
   mic_bits: 32                # SPH0645 is 32-bit I2S mic
@@ -239,7 +240,7 @@ button:
                         - intercom_api.start:
                             id: intercom
 
-  # Next contact (PTMP)
+  # Next contact (full mode)
   - platform: template
     id: next_contact_button
     name: "Next Contact"
@@ -248,7 +249,7 @@ button:
       - intercom_api.next_contact:
           id: intercom
 
-  # Previous contact (PTMP)
+  # Previous contact (full mode)
   - platform: template
     id: prev_contact_button
     name: "Previous Contact"

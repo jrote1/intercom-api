@@ -149,7 +149,7 @@ class IntercomTcpClient:
 
         Args:
             flags: Message flags (e.g., FLAG_NO_RING for caller in bridge mode)
-            caller_name: Name of caller to send to ESP (for PTMP mode)
+            caller_name: Name of caller to send to ESP (for full mode)
 
         Returns:
             "streaming" - ESP accepted, streaming started
@@ -169,7 +169,7 @@ class IntercomTcpClient:
         self._awaiting_start_ack = True
         self._awaiting_answer_ack = False
 
-        # Send START with caller_name as payload (for PTMP mode)
+        # Send START with caller_name as payload (for full mode)
         payload = caller_name.encode("utf-8") if caller_name else b""
         if not await self._send_message(MSG_START, data=payload, flags=flags):
             self._awaiting_start_ack = False

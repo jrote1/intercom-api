@@ -239,9 +239,17 @@ void I2SAudioDuplex::stop() {
   }
 
   ESP_LOGI(TAG, "Stopping duplex audio...");
+
+  // Step 1: Set all flags to false FIRST so audio task stops doing I/O
+  this->mic_running_ = false;
+  this->speaker_running_ = false;
   this->duplex_running_ = false;
 
-  // Disable channels FIRST to unblock any pending read/write operations
+  // Step 2: Wait for audio task to complete current I/O operation
+  // I2S operations have 50ms timeout, so wait a bit longer
+  vTaskDelay(pdMS_TO_TICKS(60));
+
+  // Step 3: Now safe to disable channels (task should be idle or exited)
   esp_err_t err;
   if (this->tx_handle_) {
     err = i2s_channel_disable(this->tx_handle_);
@@ -256,17 +264,17 @@ void I2SAudioDuplex::stop() {
     }
   }
 
-  // Now wait for task to finish (should exit quickly since channels are disabled)
+  // Step 4: Wait for task to fully exit
   if (this->audio_task_handle_) {
     int wait_count = 0;
-    while (eTaskGetState(this->audio_task_handle_) != eDeleted && wait_count < 100) {
+    while (eTaskGetState(this->audio_task_handle_) != eDeleted && wait_count < 50) {
       vTaskDelay(pdMS_TO_TICKS(10));
       wait_count++;
     }
     this->audio_task_handle_ = nullptr;
   }
 
-  // Delete channels (already disabled)
+  // Step 5: Delete channels
   if (this->tx_handle_) {
     i2s_del_channel(this->tx_handle_);
     this->tx_handle_ = nullptr;
@@ -275,12 +283,6 @@ void I2SAudioDuplex::stop() {
     i2s_del_channel(this->rx_handle_);
     this->rx_handle_ = nullptr;
   }
-
-  this->mic_running_ = false;
-  this->speaker_running_ = false;
-
-  // Small delay to let I2S fully deinitialize
-  vTaskDelay(pdMS_TO_TICKS(30));
 
   ESP_LOGI(TAG, "Duplex audio stopped");
 }
@@ -366,7 +368,8 @@ void I2SAudioDuplex::audio_task_() {
       // Note: i2s_channel_read timeout is in milliseconds (new driver), not ticks
       esp_err_t err = i2s_channel_read(this->rx_handle_, mic_buffer, FRAME_BYTES,
                                         &bytes_read, I2S_IO_TIMEOUT_MS);
-      if (err != ESP_OK && err != ESP_ERR_TIMEOUT) {
+      // Don't log INVALID_STATE - this is expected during shutdown (race condition)
+      if (err != ESP_OK && err != ESP_ERR_TIMEOUT && err != ESP_ERR_INVALID_STATE) {
         ESP_LOGW(TAG, "i2s_channel_read failed: %s", esp_err_to_name(err));
       }
       if (err == ESP_OK && bytes_read == FRAME_BYTES) {
@@ -450,7 +453,8 @@ void I2SAudioDuplex::audio_task_() {
 
       // Note: i2s_channel_write timeout is in milliseconds (new driver), not ticks
       esp_err_t err = i2s_channel_write(this->tx_handle_, spk_buffer, FRAME_BYTES, &bytes_written, I2S_IO_TIMEOUT_MS);
-      if (err != ESP_OK && err != ESP_ERR_TIMEOUT) {
+      // Don't log INVALID_STATE - this is expected during shutdown (race condition)
+      if (err != ESP_OK && err != ESP_ERR_TIMEOUT && err != ESP_ERR_INVALID_STATE) {
         ESP_LOGW(TAG, "i2s_channel_write failed: %s", esp_err_to_name(err));
       }
     }

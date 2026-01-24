@@ -1,8 +1,8 @@
 """Intercom Native integration for Home Assistant.
 
 This integration provides TCP-based audio streaming between browser and ESP32.
-Simple P2P mode: Browser ↔ HA ↔ ESP (port 6054)
-PTMP mode: HA detects ESP going to "Outgoing" state and auto-starts bridge
+Simple mode: Browser ↔ HA ↔ ESP (port 6054)
+Full mode: HA detects ESP going to "Outgoing" state and auto-starts bridge
 
 Unlike WebRTC/go2rtc approaches, this uses simple TCP protocols
 which are more reliable across NAT/firewall scenarios.
@@ -36,7 +36,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         async_load_platform(hass, Platform.SENSOR, DOMAIN, {}, config)
     )
 
-    _LOGGER.info("Intercom Native integration loaded (P2P + PTMP auto-bridge)")
+    _LOGGER.info("Intercom Native integration loaded (simple + full mode auto-bridge)")
     return True
 
 

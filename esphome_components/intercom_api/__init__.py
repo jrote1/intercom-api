@@ -42,8 +42,8 @@ CONF_ON_HANGUP = "on_hangup"
 CONF_ON_CALL_FAILED = "on_call_failed"
 
 # Mode constants
-MODE_P2P = "p2p"      # Simple: ring → HA notification → answer
-MODE_PTMP = "ptmp"    # Advanced: contacts, destination, ESP↔ESP calls
+MODE_SIMPLE = "simple"  # Simple: ring → HA notification → answer (browser ↔ ESP only)
+MODE_FULL = "full"      # Full: contacts, destination, ESP↔ESP calls via HA bridge
 
 intercom_api_ns = cg.esphome_ns.namespace("intercom_api")
 IntercomApi = intercom_api_ns.class_("IntercomApi", cg.Component)
@@ -88,8 +88,8 @@ def _aec_schema(value):
 CONFIG_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(IntercomApi),
-        # Mode: p2p (simple doorbell) or ptmp (multi-device with contacts)
-        cv.Optional(CONF_MODE, default=MODE_P2P): cv.one_of(MODE_P2P, MODE_PTMP, lower=True),
+        # Mode: simple (browser↔ESP only) or full (multi-device with contacts, ESP↔ESP)
+        cv.Optional(CONF_MODE, default=MODE_SIMPLE): cv.one_of(MODE_SIMPLE, MODE_FULL, lower=True),
         cv.Optional(CONF_MICROPHONE): cv.use_id(microphone.Microphone),
         cv.Optional(CONF_SPEAKER): cv.use_id(speaker.Speaker),
         # For 32-bit mics like SPH0645 that need conversion to 16-bit
@@ -123,10 +123,10 @@ async def to_code(config):
     await cg.register_component(var, config)
 
     mode = config[CONF_MODE]
-    is_ptmp = mode == MODE_PTMP
+    is_full = mode == MODE_FULL
 
     # Set mode on the C++ component
-    cg.add(var.set_ptmp_mode(is_ptmp))
+    cg.add(var.set_full_mode(is_full))
 
     if CONF_MICROPHONE in config:
         mic = await cg.get_variable(config[CONF_MICROPHONE])
@@ -139,7 +139,7 @@ async def to_code(config):
     cg.add(var.set_mic_bits(config[CONF_MIC_BITS]))
     cg.add(var.set_dc_offset_removal(config[CONF_DC_OFFSET_REMOVAL]))
 
-    # Set device name (for PTMP: exclude self from contacts list)
+    # Set device name (for full mode: exclude self from contacts list)
     cg.add(var.set_device_name(cg.RawExpression('App.get_friendly_name()')))
 
     if CONF_AEC_ID in config and config[CONF_AEC_ID] is not None:
@@ -205,7 +205,7 @@ async def to_code(config):
 
     # === Auto-create sensors ===
 
-    # State sensor: always created (both P2P and PTMP need it)
+    # State sensor: always created (both simple and full modes need it)
     state_sensor_id = cv.declare_id(text_sensor.TextSensor)(f"{config[CONF_ID].id}_state")
     state_sensor = await text_sensor.new_text_sensor(
         {
@@ -217,8 +217,8 @@ async def to_code(config):
     )
     cg.add(var.set_state_sensor(state_sensor))
 
-    # PTMP-only sensors
-    if is_ptmp:
+    # Full mode sensors (contacts, destination, caller)
+    if is_full:
         # Destination sensor (selected contact)
         dest_sensor_id = cv.declare_id(text_sensor.TextSensor)(f"{config[CONF_ID].id}_dest")
         dest_sensor = await text_sensor.new_text_sensor(

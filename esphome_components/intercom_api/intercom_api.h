@@ -180,8 +180,8 @@ class IntercomApi : public Component {
   const char *get_state_str() const;
 
   // Mode setting
-  void set_ptmp_mode(bool ptmp) { this->ptmp_mode_ = ptmp; }
-  bool is_ptmp_mode() const { return this->ptmp_mode_; }
+  void set_full_mode(bool full) { this->full_mode_ = full; }
+  bool is_full_mode() const { return this->full_mode_; }
 
   // Sensor registration
   void set_state_sensor(text_sensor::TextSensor *sensor) { this->state_sensor_ = sensor; }
@@ -203,7 +203,7 @@ class IntercomApi : public Component {
   void publish_caller_(const std::string &caller_name);
   void publish_contacts_();
 
-  // Contacts management (PTMP only)
+  // Contacts management (full mode only)
   void set_contacts(const std::string &contacts_csv);
   void next_contact();
   void prev_contact();
@@ -277,17 +277,17 @@ class IntercomApi : public Component {
 #endif
 
   // Mode and state
-  bool ptmp_mode_{false};  // P2P (false) or PTMP (true) mode
+  bool full_mode_{false};  // simple (false) or full (true) mode
   std::atomic<bool> active_{false};
   std::atomic<bool> server_running_{false};
   ConnectionState state_{ConnectionState::DISCONNECTED};
   CallState call_state_{CallState::IDLE};  // High-level FSM state
 
-  // Sensors (state is always present, others only in PTMP mode)
+  // Sensors (state is always present, others only in full mode)
   text_sensor::TextSensor *state_sensor_{nullptr};
-  text_sensor::TextSensor *destination_sensor_{nullptr};  // PTMP: selected contact
-  text_sensor::TextSensor *caller_sensor_{nullptr};       // PTMP: who is calling
-  text_sensor::TextSensor *contacts_sensor_{nullptr};     // PTMP: CSV of contacts
+  text_sensor::TextSensor *destination_sensor_{nullptr};  // full: selected contact
+  text_sensor::TextSensor *caller_sensor_{nullptr};       // full: who is calling
+  text_sensor::TextSensor *contacts_sensor_{nullptr};     // full: CSV of contacts
 
   // Registered entities (for state sync after boot)
   switch_::Switch *auto_answer_switch_{nullptr};
@@ -297,7 +297,7 @@ class IntercomApi : public Component {
   switch_::Switch *aec_switch_{nullptr};
 #endif
 
-  // Contacts management (PTMP only)
+  // Contacts management (full mode only)
   std::vector<std::string> contacts_{"Home Assistant"};  // Default contact
   size_t contact_index_{0};
   std::string device_name_;  // This device's friendly name (to exclude from contacts)

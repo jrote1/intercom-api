@@ -48,6 +48,7 @@ esp32:
       CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240: "y"
       CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
       CONFIG_ESP32S3_DATA_CACHE_LINE_64B: "y"
+      CONFIG_LWIP_MAX_SOCKETS: "16"
     components:
       - espressif/esp-sr^2.3.0
 
@@ -167,13 +168,13 @@ output:
 # ==============================================================================
 # Auto-creates these sensors:
 #   - text_sensor: intercom_state (Idle/Ringing/Streaming)
-#   - text_sensor: destination (selected contact) [PTMP only]
-#   - text_sensor: caller (who is calling) [PTMP only]
-#   - text_sensor: contacts (count) [PTMP only]
+#   - text_sensor: destination (selected contact) [full mode only]
+#   - text_sensor: caller (who is calling) [full mode only]
+#   - text_sensor: contacts (count) [full mode only]
 
 intercom_api:
   id: intercom
-  mode: ptmp
+  mode: full
   microphone: mic_component
   speaker: spk_component
   aec_id: aec_component
@@ -308,7 +309,7 @@ button:
       - intercom_api.call_toggle:
           id: intercom
 
-  # Next contact (PTMP)
+  # Next contact (full mode)
   - platform: template
     id: next_contact_button
     name: "Next Contact"
@@ -319,7 +320,7 @@ button:
       - lambda: 'id(peer_name) = id(intercom).get_current_destination();'
       - script.execute: update_display_page
 
-  # Previous contact (PTMP)
+  # Previous contact (full mode)
   - platform: template
     id: prev_contact_button
     name: "Previous Contact"

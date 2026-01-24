@@ -191,7 +191,7 @@ void IntercomApi::loop() {
         this->close_client_socket_();
         this->state_ = ConnectionState::DISCONNECTED;
         this->pending_incoming_call_ = false;
-        if (this->ptmp_mode_) {
+        if (this->full_mode_) {
           this->publish_caller_("");
         }
         this->end_call_(CallEndReason::TIMEOUT);
@@ -264,8 +264,13 @@ void IntercomApi::load_settings_() {
   if (this->settings_pref_.load(&stored) && stored.version == SETTINGS_VERSION) {
     this->suppress_save_ = true;  // Don't save while loading
 
-    // Apply volume
+    // Apply volume - must also call speaker_->set_volume() to actually apply it!
     this->volume_ = stored.volume_pct / 100.0f;
+#ifdef USE_SPEAKER
+    if (this->speaker_ != nullptr) {
+      this->speaker_->set_volume(this->volume_);
+    }
+#endif
     ESP_LOGI(TAG, "Loaded volume: %d%%", stored.volume_pct);
 
     // Apply mic gain
@@ -511,8 +516,8 @@ void IntercomApi::publish_state_() {
 // === Contacts Management ===
 
 void IntercomApi::set_contacts(const std::string &contacts_csv) {
-  // PTMP only - in P2P mode, contacts are not used
-  if (!this->ptmp_mode_) return;
+  // Full mode only - in simple mode, contacts are not used
+  if (!this->full_mode_) return;
 
   // Save current selection to preserve it if possible
   const std::string previous = this->get_current_destination();
@@ -564,7 +569,7 @@ void IntercomApi::set_contacts(const std::string &contacts_csv) {
 }
 
 void IntercomApi::next_contact() {
-  if (!this->ptmp_mode_) return;  // PTMP only
+  if (!this->full_mode_) return;  // Full mode only
   if (this->contacts_.empty()) return;
   this->contact_index_ = (this->contact_index_ + 1) % this->contacts_.size();
   this->publish_destination_();
@@ -572,7 +577,7 @@ void IntercomApi::next_contact() {
 }
 
 void IntercomApi::prev_contact() {
-  if (!this->ptmp_mode_) return;  // PTMP only
+  if (!this->full_mode_) return;  // Full mode only
   if (this->contacts_.empty()) return;
   this->contact_index_ = (this->contact_index_ + this->contacts_.size() - 1) % this->contacts_.size();
   this->publish_destination_();
@@ -869,13 +874,18 @@ void IntercomApi::server_task_() {
         } else {
           // Connection closed or error
           ESP_LOGI(TAG, "Client disconnected");
+          // IMPORTANT: Order matters to avoid race conditions
+          // 1. Stop streaming flag first
+          this->client_.streaming.store(false);
+          // 2. Close socket immediately
           this->close_client_socket_();
+          // 3. Now stop audio hardware
           this->set_active_(false);
           this->state_ = ConnectionState::DISCONNECTED;
           this->pending_incoming_call_ = false;  // Clear pending flag
 
-          // Clear caller sensor in PTMP mode
-          if (this->ptmp_mode_) {
+          // Clear caller sensor in full mode
+          if (this->full_mode_) {
             this->publish_caller_("");
           }
 
@@ -1004,7 +1014,8 @@ void IntercomApi::tx_task_() {
           ssize_t sent = send(socket, this->audio_tx_buffer_, total, MSG_DONTWAIT);
 
           if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-            if (this->active_.load(std::memory_order_acquire)) {
+            // Only log if still streaming - avoid noise during shutdown
+            if (this->client_.streaming.load(std::memory_order_acquire)) {
               ESP_LOGW(TAG, "TX send error: %d", errno);
             }
           }
@@ -1048,7 +1059,8 @@ void IntercomApi::tx_task_() {
       ssize_t sent = send(socket, this->audio_tx_buffer_, total, MSG_DONTWAIT);
 
       if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-        if (this->active_.load(std::memory_order_acquire)) {
+        // Only log if still streaming - avoid noise during shutdown
+        if (this->client_.streaming.load(std::memory_order_acquire)) {
           ESP_LOGW(TAG, "TX send error: %d", errno);
         }
       }
@@ -1196,8 +1208,10 @@ bool IntercomApi::send_message_(int socket, MessageType type, MessageFlags flags
       continue;
     }
 
-    // Real error
-    ESP_LOGW(TAG, "Send failed: errno=%d sent=%zd offset=%zu total=%zu", errno, sent, offset, total);
+    // Real error - only log if we expect the connection to be valid
+    if (this->client_.streaming.load(std::memory_order_relaxed)) {
+      ESP_LOGW(TAG, "Send failed: errno=%d sent=%zd offset=%zu total=%zu", errno, sent, offset, total);
+    }
     xSemaphoreGive(this->send_mutex_);
     return false;
   }
@@ -1324,7 +1338,7 @@ void IntercomApi::handle_message_(const MessageHeader &header, const uint8_t *da
                call_state_to_str(this->call_state_));
 
       // Publish caller name (even if empty - clears previous)
-      if (this->ptmp_mode_) {
+      if (this->full_mode_) {
         this->publish_caller_(caller_name);
       }
 
@@ -1340,10 +1354,10 @@ void IntercomApi::handle_message_(const MessageHeader &header, const uint8_t *da
         this->state_ = ConnectionState::STREAMING;
         this->send_message_(this->client_.socket.load(), MessageType::PONG);
       } else if (this->auto_answer_) {
-        // Auto-answer ON: start streaming immediately (we are callee)
-        this->set_call_state_(CallState::INCOMING);  // FSM: incoming call
+        // Auto-answer ON: start streaming immediately, skip INCOMING/RINGING states
+        // This prevents on_incoming_call trigger from firing for auto-answered calls
         this->pending_incoming_call_ = false;
-        this->set_call_state_(CallState::ANSWERING);  // FSM: answering
+        this->set_call_state_(CallState::ANSWERING);  // FSM: go directly to answering
         this->set_active_(true);
         this->set_streaming_(true);  // This will set CallState::STREAMING
         this->send_message_(this->client_.socket.load(), MessageType::PONG);
@@ -1364,12 +1378,18 @@ void IntercomApi::handle_message_(const MessageHeader &header, const uint8_t *da
     case MessageType::STOP:
       ESP_LOGI(TAG, "Received STOP from client");
       this->pending_incoming_call_ = false;  // Clear incoming call flag
-      // Clear caller name in PTMP mode
-      if (this->ptmp_mode_) {
+      // Clear caller name in full mode
+      if (this->full_mode_) {
         this->publish_caller_("");
       }
+      // IMPORTANT: Order matters to avoid race conditions
+      // 1. Stop streaming flag first (TX task checks this)
       this->set_streaming_(false);
+      // 2. Close socket immediately (before set_active_ which takes time)
+      this->close_client_socket_();
+      // 3. Now stop audio hardware (waits for tasks)
       this->set_active_(false);
+      this->state_ = ConnectionState::DISCONNECTED;
       this->end_call_(CallEndReason::REMOTE_HANGUP);  // FSM with reason
       break;
 
@@ -1499,7 +1519,25 @@ void IntercomApi::accept_client_() {
 
   // Check if already have a client
   if (this->client_.socket.load() >= 0) {
-    ESP_LOGW(TAG, "Rejecting connection - already have client");
+    ESP_LOGW(TAG, "Rejecting connection - already have client (socket=%d)", this->client_.socket.load());
+    // Send ERROR
+    MessageHeader header;
+    header.type = static_cast<uint8_t>(MessageType::ERROR);
+    header.flags = 0;
+    header.length = 1;
+    uint8_t error_code = static_cast<uint8_t>(ErrorCode::BUSY);
+    uint8_t msg[HEADER_SIZE + 1];
+    memcpy(msg, &header, HEADER_SIZE);
+    msg[HEADER_SIZE] = error_code;
+    send(client_sock, msg, sizeof(msg), 0);
+    close(client_sock);
+    return;
+  }
+
+  // Check if we're in a state that shouldn't accept new connections
+  // Allow IDLE (normal) and OUTGOING (ESP called someone, waiting for answer)
+  if (this->call_state_ != CallState::IDLE && this->call_state_ != CallState::OUTGOING) {
+    ESP_LOGW(TAG, "Rejecting connection - busy (state=%s)", call_state_to_str(this->call_state_));
     // Send ERROR
     MessageHeader header;
     header.type = static_cast<uint8_t>(MessageType::ERROR);

@@ -407,15 +407,14 @@ See the [i2s_audio_duplex README](esphome_components/i2s_audio_duplex/README.md)
 
 ## Roadmap
 
-### Current Version (v1.0.0)
-- P2P mode: Browser ↔ Home Assistant ↔ ESP
+### Current Version (v2.0)
+- **Simple mode**: Browser ↔ Home Assistant ↔ ESP
+- **Full mode**: ESP ↔ Home Assistant ↔ ESP (bridged audio)
+  - ESP-to-ESP calls through Home Assistant relay
+  - PBX-like intercom functionality
+  - Contact lists and call routing
 
 ### Planned Features
-
-**PTMP Mode (Point-to-MultiPoint)**
-- ESP-to-ESP calls through Home Assistant relay
-- PBX-like intercom functionality
-- Contact lists and call routing
 
 **Voice Assistant Integration**
 - Voice commands: "Call kitchen", "Call Home Assistant"

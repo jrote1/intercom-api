@@ -343,7 +343,7 @@ class IntercomSession:
 
 
 class BridgeSession:
-    """Manages audio bridge between two ESP devices (PTMP mode).
+    """Manages audio bridge between two ESP devices (full mode).
 
     Uses queues + dedicated sender tasks instead of task-per-packet
     to prevent race conditions during hangup/stop.
@@ -953,7 +953,7 @@ async def websocket_bridge(
     connection: websocket_api.ActiveConnection,
     msg: Dict[str, Any],
 ) -> None:
-    """Start bridge between two ESP devices (PTMP mode)."""
+    """Start bridge between two ESP devices (full mode)."""
     source_device_id = msg["source_device_id"]
     source_host = msg["source_host"]
     source_name = msg.get("source_name", "Intercom")

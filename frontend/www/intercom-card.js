@@ -22,7 +22,7 @@ class IntercomCard extends HTMLElement {
     this._starting = false;
     this._stopping = false;
 
-    // Audio (P2P mode only)
+    // Audio (simple mode only)
     this._audioContext = null;
     this._mediaStream = null;
     this._workletNode = null;
@@ -62,8 +62,8 @@ class IntercomCard extends HTMLElement {
     const oldHass = this._hass;
     this._hass = hass;
 
-    // Load devices for PTMP mode
-    if (hass && this._isPtmpMode() && this._availableDevices.length === 0) {
+    // Load devices for full mode
+    if (hass && this._isFullMode() && this._availableDevices.length === 0) {
       this._loadAvailableDevices();
     }
 
@@ -89,7 +89,7 @@ class IntercomCard extends HTMLElement {
         }
       }
 
-      // Check destination (for PTMP contact cycling)
+      // Check destination (for full mode contact cycling)
       if (this._destinationEntityId) {
         const destEntity = hass.states[this._destinationEntityId];
         const oldDestEntity = oldHass?.states?.[this._destinationEntityId];
@@ -119,8 +119,8 @@ class IntercomCard extends HTMLElement {
     }
   }
 
-  _isPtmpMode() {
-    return this.config?.mode === "ptmp";
+  _isFullMode() {
+    return this.config?.mode === "full";
   }
 
   _getConfigDeviceId() {
@@ -219,7 +219,7 @@ class IntercomCard extends HTMLElement {
     }
 
     const espState = this._getEspState();
-    const isPtmp = this._isPtmpMode();
+    const isFullMode = this._isFullMode();
     const destination = this._getDestination();
     const caller = this._getCallerName();
 
@@ -297,8 +297,8 @@ class IntercomCard extends HTMLElement {
           display: inline-block; font-size: 0.7em; padding: 2px 6px;
           border-radius: 4px; margin-left: 8px; vertical-align: middle;
         }
-        .mode-badge.p2p { background: #4caf50; color: white; }
-        .mode-badge.ptmp { background: #2196f3; color: white; }
+        .mode-badge.simple { background: #4caf50; color: white; }
+        .mode-badge.full { background: #2196f3; color: white; }
 
         .destination-row {
           display: flex; align-items: center; justify-content: center;
@@ -351,10 +351,10 @@ class IntercomCard extends HTMLElement {
       <div class="card">
         <div class="header">
           ${name}
-          <span class="mode-badge ${isPtmp ? 'ptmp' : 'p2p'}">${isPtmp ? 'PTMP' : 'P2P'}</span>
+          <span class="mode-badge ${isFullMode ? 'full' : 'simple'}">${isFullMode ? 'Full' : 'Simple'}</span>
         </div>
 
-        ${isPtmp && showCall ? `
+        ${isFullMode && showCall ? `
         <div class="destination-row">
           <button class="nav-btn" id="prev-btn" ${buttonDisabled ? 'disabled' : ''} title="Previous">&lt;</button>
           <div class="destination-value">
@@ -382,7 +382,7 @@ class IntercomCard extends HTMLElement {
           <span class="status-indicator ${statusClass}"></span>
           ${statusText}
         </div>
-        <div class="stats" id="stats">${isPtmp ? (destination === 'Home Assistant' ? 'Browser ↔ ESP' : 'ESP ↔ ESP') : 'Sent: 0 | Recv: 0'}</div>
+        <div class="stats" id="stats">${isFullMode ? (destination === 'Home Assistant' ? 'Browser ↔ ESP' : 'ESP ↔ ESP') : 'Sent: 0 | Recv: 0'}</div>
         <div class="error" id="err"></div>
         <div class="version">v${INTERCOM_CARD_VERSION}</div>
       </div>
@@ -456,8 +456,8 @@ class IntercomCard extends HTMLElement {
     try {
       const destination = this._getDestination();
 
-      if (this._isPtmpMode() && destination !== "Home Assistant") {
-        // PTMP: Bridge to another ESP
+      if (this._isFullMode() && destination !== "Home Assistant") {
+        // Full mode: Bridge to another ESP
         await this._startBridge(deviceInfo, destination);
       } else {
         // P2P: Direct call with browser audio
@@ -790,7 +790,7 @@ class IntercomCard extends HTMLElement {
 
   _updateStats() {
     const el = this.shadowRoot?.getElementById("stats");
-    // Show stats when browser audio is active (P2P or PTMP with Home Assistant)
+    // Show stats when browser audio is active (simple mode or full mode with Home Assistant)
     if (el && this._audioStreaming) {
       el.textContent = `Sent: ${this._chunksSent} | Recv: ${this._chunksReceived}`;
     }
@@ -853,7 +853,7 @@ class IntercomCardEditor extends HTMLElement {
       `<option value="${d.device_id}" ${this._config.entity_id === d.device_id ? 'selected' : ''}>${d.name}</option>`
     ).join('');
 
-    const currentMode = this._config.mode || 'p2p';
+    const currentMode = this._config.mode || 'simple';
 
     this.innerHTML = `
       <style>
@@ -895,22 +895,22 @@ class IntercomCardEditor extends HTMLElement {
         <div class="form-group">
           <label>Mode</label>
           <div class="mode-selector">
-            <div class="mode-btn ${currentMode === 'p2p' ? 'selected' : ''}" id="mode-p2p">
-              <div class="mode-title">P2P</div>
+            <div class="mode-btn ${currentMode === 'simple' ? 'selected' : ''}" id="mode-simple">
+              <div class="mode-title">Simple</div>
               <div class="mode-desc">Browser ↔ ESP</div>
             </div>
-            <div class="mode-btn ${currentMode === 'ptmp' ? 'selected' : ''}" id="mode-ptmp">
-              <div class="mode-title">PTMP</div>
+            <div class="mode-btn ${currentMode === 'full' ? 'selected' : ''}" id="mode-full">
+              <div class="mode-title">Full</div>
               <div class="mode-desc">ESP ↔ ESP</div>
             </div>
           </div>
         </div>
         <div class="mode-info">
-          ${currentMode === 'p2p' ? `
-            <h4>P2P Mode</h4>
+          ${currentMode === 'simple' ? `
+            <h4>Simple Mode</h4>
             <p>Browser audio ↔ ESP device</p>
           ` : `
-            <h4>PTMP Mode</h4>
+            <h4>Full Mode</h4>
             <p>ESP ↔ ESP bridged through Home Assistant</p>
           `}
         </div>
@@ -919,8 +919,8 @@ class IntercomCardEditor extends HTMLElement {
 
     this.querySelector('#entity-select').onchange = (e) => this._valueChanged('entity_id', e.target.value);
     this.querySelector('#name-input').onchange = (e) => this._valueChanged('name', e.target.value);
-    this.querySelector('#mode-p2p').onclick = () => this._valueChanged('mode', 'p2p');
-    this.querySelector('#mode-ptmp').onclick = () => this._valueChanged('mode', 'ptmp');
+    this.querySelector('#mode-simple').onclick = () => this._valueChanged('mode', 'simple');
+    this.querySelector('#mode-full').onclick = () => this._valueChanged('mode', 'full');
   }
 
   _valueChanged(key, value) {
@@ -938,6 +938,6 @@ window.customCards = window.customCards || [];
 window.customCards.push({
   type: "intercom-card",
   name: "Intercom Card",
-  description: "ESP intercom control - mirrors ESP state (P2P and PTMP modes)",
+  description: "ESP intercom control - mirrors ESP state (Simple and Full modes)",
   preview: true,
 });
