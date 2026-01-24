@@ -1,6 +1,6 @@
 # ESPHome Intercom API
 
-A flexible intercom framework for ESP32 devices - from simple doorbell to PBX-like multi-device system.
+A flexible intercom framework for ESP32 devices - from simple full-duplex doorbell to PBX-like multi-device system.
 
 ![Dashboard Preview](readme-img/dashboard.png)
 
@@ -378,7 +378,7 @@ The card automatically discovers ESPHome devices with the `intercom_api` compone
 
 ### Simple Mode (Browser ↔ ESP)
 
-In Simple mode, the browser communicates directly with a single ESP device through Home Assistant.
+In Simple mode, the browser communicates directly with a single ESP device through Home Assistant. If the ESP has **Auto Answer** enabled, streaming starts automatically when you call.
 
 ![Browser calling ESP](readme-img/call-from-home-assistant-to-esp.gif)
 
