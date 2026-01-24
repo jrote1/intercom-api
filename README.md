@@ -838,6 +838,16 @@ Complete working examples are provided in the repository:
 
 ---
 
+## Support the Project
+
+If this project was helpful and you'd like to see more useful ESPHome/Home Assistant integrations, please consider supporting my work:
+
+[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-red?logo=github)](https://github.com/sponsors/n-IA-hane)
+
+Your support helps me dedicate more time to open source development. Thank you! 🙏
+
+---
+
 ## License
 
 MIT License - See [LICENSE](LICENSE) for details.
