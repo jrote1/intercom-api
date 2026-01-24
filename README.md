@@ -6,6 +6,15 @@ A flexible intercom framework for ESP32 devices - from simple doorbell to PBX-li
 
 ![Dashboard Demo](readme-img/dashboard.gif)
 
+<table>
+  <tr>
+    <td align="center"><img src="readme-img/idle.jpg" width="180"/><br/><b>Idle</b></td>
+    <td align="center"><img src="readme-img/calling.jpg" width="180"/><br/><b>Calling</b></td>
+    <td align="center"><img src="readme-img/ringing.jpg" width="180"/><br/><b>Ringing</b></td>
+    <td align="center"><img src="readme-img/in_call.jpg" width="180"/><br/><b>In Call</b></td>
+  </tr>
+</table>
+
 ## Table of Contents
 
 - [Overview](#overview)
