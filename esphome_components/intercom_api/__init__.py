@@ -90,7 +90,7 @@ CONFIG_SCHEMA = cv.Schema(
         cv.GenerateID(): cv.declare_id(IntercomApi),
         # Mode: simple (browser↔ESP only) or full (multi-device with contacts, ESP↔ESP)
         cv.Optional(CONF_MODE, default=MODE_SIMPLE): cv.one_of(MODE_SIMPLE, MODE_FULL, lower=True),
-        cv.Optional(CONF_MICROPHONE): cv.use_id(microphone.Microphone),
+        cv.Optional(CONF_MICROPHONE): microphone.microphone_source_schema(),
         cv.Optional(CONF_SPEAKER): cv.use_id(speaker.Speaker),
         # For 32-bit mics like SPH0645 that need conversion to 16-bit
         cv.Optional(CONF_MIC_BITS, default=16): cv.int_range(min=16, max=32),
@@ -129,8 +129,8 @@ async def to_code(config):
     cg.add(var.set_full_mode(is_full))
 
     if CONF_MICROPHONE in config:
-        mic = await cg.get_variable(config[CONF_MICROPHONE])
-        cg.add(var.set_microphone(mic))
+        mic_source = await microphone.microphone_source_to_code(config[CONF_MICROPHONE])
+        cg.add(var.set_microphone_source(mic_source))
 
     if CONF_SPEAKER in config:
         spk = await cg.get_variable(config[CONF_SPEAKER])

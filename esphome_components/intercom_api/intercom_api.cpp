@@ -63,8 +63,8 @@ void IntercomApi::setup() {
 
   // Setup microphone callback
 #ifdef USE_MICROPHONE
-  if (this->microphone_ != nullptr) {
-    this->microphone_->add_data_callback([this](const std::vector<uint8_t> &data) {
+  if (this->microphone_source_ != nullptr) {
+    this->microphone_source_->add_data_callback([this](const std::vector<uint8_t> &data) {
       this->on_microphone_data_(data.data(), data.size());
     });
   }
@@ -216,7 +216,7 @@ void IntercomApi::dump_config() {
   ESP_LOGCONFIG(TAG, "Intercom API:");
   ESP_LOGCONFIG(TAG, "  Port: %d", INTERCOM_PORT);
 #ifdef USE_MICROPHONE
-  ESP_LOGCONFIG(TAG, "  Microphone: %s", this->microphone_ ? "configured" : "none");
+  ESP_LOGCONFIG(TAG, "  Microphone: %s", this->microphone_source_ ? "configured" : "none");
 #endif
 #ifdef USE_SPEAKER
   ESP_LOGCONFIG(TAG, "  Speaker: %s", this->speaker_ ? "configured" : "none");
@@ -648,8 +648,8 @@ void IntercomApi::set_active_(bool on) {
     this->speaker_stop_requested_.store(false, std::memory_order_release);
 
 #ifdef USE_MICROPHONE
-    if (this->microphone_) {
-      this->microphone_->start();
+    if (this->microphone_source_) {
+      this->microphone_source_->start();
     }
 #endif
 #ifdef USE_SPEAKER
@@ -680,8 +680,8 @@ void IntercomApi::set_active_(bool on) {
 #endif
 
 #ifdef USE_MICROPHONE
-    if (this->microphone_) {
-      this->microphone_->stop();
+    if (this->microphone_source_) {
+      this->microphone_source_->stop();
     }
 #endif
 

@@ -10,6 +10,7 @@
 
 #ifdef USE_MICROPHONE
 #include "esphome/components/microphone/microphone.h"
+#include "esphome/components/microphone/microphone_source.h"
 #endif
 #ifdef USE_SPEAKER
 #include "esphome/components/speaker/speaker.h"
@@ -116,7 +117,7 @@ class IntercomApi : public Component {
 
   // Configuration
 #ifdef USE_MICROPHONE
-  void set_microphone(microphone::Microphone *mic) { this->microphone_ = mic; }
+  void set_microphone_source(microphone::MicrophoneSource *source) { this->microphone_source_ = source; }
 #endif
 #ifdef USE_SPEAKER
   void set_speaker(speaker::Speaker *spk) { this->speaker_ = spk; }
@@ -272,7 +273,7 @@ class IntercomApi : public Component {
 
   // Components
 #ifdef USE_MICROPHONE
-  microphone::Microphone *microphone_{nullptr};
+  microphone::MicrophoneSource *microphone_source_{nullptr};
 #endif
 #ifdef USE_SPEAKER
   speaker::Speaker *speaker_{nullptr};
