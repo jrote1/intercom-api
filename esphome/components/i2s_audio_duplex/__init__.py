@@ -12,6 +12,7 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import pins
 from esphome.const import CONF_ID, CONF_SAMPLE_RATE
+from esphome.components.esp32 import include_builtin_idf_component
 
 CODEOWNERS = ["@n-IA-hane"]
 DEPENDENCIES = ["esp32"]
@@ -138,6 +139,8 @@ async def to_code(config):
 
     # Define USE_I2S_AUDIO_DUPLEX so other components know it's available
     cg.add_define("USE_I2S_AUDIO_DUPLEX")
+
+    include_builtin_idf_component("esp_driver_i2s")
 
     cg.add(var.set_lrclk_pin(config[CONF_I2S_LRCLK_PIN]))
     cg.add(var.set_bclk_pin(config[CONF_I2S_BCLK_PIN]))
